@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+from uuid import uuid4
+
+import httpx
+from anthropic import APIConnectionError
+
+from src.generation import generator
+from src.models import Chunk, RetrievedChunk
+from src.retrieval.pipeline import RetrievalResult
+
+
+def _mk_context() -> list[RetrievedChunk]:
+    chunk = Chunk(
+        id=uuid4(),
+        document_id=uuid4(),
+        company="Digital Realty",
+        ticker="DLR",
+        doc_type="investor_presentation",
+        report_date="2026-03",
+        period_covered="Q4 2025",
+        doc_version="2026-03",
+        section_title="Leverage",
+        page_number=14,
+        content_type="text",
+        chunk_text="Net debt to EBITDA was 5.0x",
+    )
+    return [RetrievedChunk(chunk=chunk, rerank_score=2.0)]
+
+
+def _mk_retrieval() -> RetrievalResult:
+    return RetrievalResult(
+        query="test",
+        intent="latest",
+        contexts=_mk_context(),
+        companies=["Digital Realty"],
+        abstain=False,
+        diagnostics={"top_rerank_score": 2.0},
+    )
+
+
+class _FailingMessages:
+    def create(self, **kwargs):  # noqa: ANN003
+        raise APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+
+    def stream(self, **kwargs):  # noqa: ANN003
+        raise APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+
+
+class _FailingClient:
+    def __init__(self) -> None:
+        self.messages = _FailingMessages()
+
+
+def test_answer_returns_controlled_error_on_generation_failure(monkeypatch) -> None:
+    monkeypatch.setattr(generator, "retrieve", lambda query: _mk_retrieval())
+    monkeypatch.setattr(generator, "_get_client", lambda: _FailingClient())
+
+    result = generator.answer("What is DLR leverage?")
+    assert result.abstained is True
+    assert "temporary model/API issue" in result.text
+    assert result.diagnostics.get("generation_error") == "APIConnectionError"
+
+
+def test_answer_stream_emits_abstain_and_final_on_generation_failure(monkeypatch) -> None:
+    monkeypatch.setattr(generator, "retrieve", lambda query: _mk_retrieval())
+    monkeypatch.setattr(generator, "_get_client", lambda: _FailingClient())
+
+    events = list(generator.answer_stream("What is DLR leverage?"))
+    assert events[0]["event"] == "retrieval"
+    assert events[1]["event"] == "abstain"
+    assert "temporary model/API issue" in events[1]["text"]
+    assert events[2]["event"] == "final"
+    assert events[2]["answer"].abstained is True
