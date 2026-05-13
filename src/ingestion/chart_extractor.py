@@ -1,0 +1,230 @@
+"""Chart-description extraction via Claude vision.
+
+Used by `scripts/enrich_charts.py` to upgrade Docling's captionless PictureItems
+into structured chart descriptions that retrieve and cite like any other chunk.
+
+This module owns:
+  - the structured extraction prompt
+  - the Anthropic vision API call
+  - PIL image → base64 conversion
+  - the NOT_CHART sentinel parsing
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import logging
+import os
+import re
+import time
+from typing import Optional
+
+from PIL import Image
+from anthropic import Anthropic
+from anthropic import APIConnectionError, APIStatusError, RateLimitError
+
+logger = logging.getLogger(__name__)
+
+# Use the same model as the answer generator for consistency across
+# ingestion-time and query-time prompts.
+VISION_MODEL = "claude-sonnet-4-6"
+MAX_TOKENS = 600  # extraction output is short; cap to control cost
+MIN_IMAGE_DIM = 100  # below this on either axis → assume logo / icon, skip
+
+# Sentinel the prompt instructs the model to emit for non-chart images.
+NOT_CHART_SENTINEL = "NOT_CHART"
+_NOT_CHART_RE = re.compile(r"\bNOT_CHART\b", re.IGNORECASE)
+
+# Retry parameters for transient Anthropic API failures (connection drops, 5xx,
+# and rate limits). Retries use exponential backoff to reduce silent extraction
+# loss during intermittent failures.
+MAX_RETRIES = 3
+INITIAL_BACKOFF_SECONDS = 2.0
+
+
+def _parse_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+    """Parse a float env var with validation and fallback."""
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.2f", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("%s=%.2f is below minimum %.2f; using default %.2f", name, value, minimum, default)
+        return default
+    return value
+
+
+# Proactive pacing to reduce 429 frequency on Tier-1 limits.
+MIN_REQUEST_INTERVAL_SECONDS = _parse_float_env(
+    "VISION_MIN_INTERVAL_SECONDS", 1.4, minimum=0.0
+)
+
+VISION_PROMPT = """Examine this image from a REIT investor presentation.
+
+If this is NOT a chart (it's a logo, headshot, decorative graphic, photograph, map without data values, or other non-data visual): respond with exactly the single word: NOT_CHART
+
+If this IS a chart, table-as-image, or data visualization, extract its content in this format:
+
+Chart type: <bar / line / pie / scatter / waterfall / table / other>
+Title: <if visible, else "(none)">
+Axes / categories: <X-axis label and units; Y-axis label and units; or category names>
+Data series: <each series name and what it represents>
+Key values: <list the readable data points with their associated label; mark approximations explicitly with "approximately">
+Insight: <one sentence on what the chart is communicating; trend direction, comparison, anomaly>
+
+Be precise. Where you cannot read a value confidently, say so ("approximately 5.2x", "between 30% and 40%"). Never invent numbers."""
+
+
+_client: Anthropic | None = None
+_last_request_ts: float = 0.0
+
+
+def _get_client() -> Anthropic:
+    global _client
+    if _client is None:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set")
+        _client = Anthropic(api_key=api_key)
+    return _client
+
+
+def _image_to_base64_png(image: Image.Image) -> str:
+    """Encode a PIL Image as base64 PNG."""
+    buf = io.BytesIO()
+    # Convert any palette / RGBA-with-transparency to a clean RGB so encoders agree
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGB")
+    image.save(buf, format="PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def extract_chart(image: Image.Image) -> Optional[str]:
+    """Call Claude vision to extract a structured chart description.
+
+    Args:
+        image: PIL Image of a single PictureItem from Docling.
+
+    Returns:
+        - The structured description string if the model identified a chart.
+        - None if the image is below the size threshold or the model returned
+          the NOT_CHART sentinel.
+    """
+    width, height = image.size
+    if width < MIN_IMAGE_DIM or height < MIN_IMAGE_DIM:
+        logger.debug("Skipping small image (%dx%d) — likely a logo/icon", width, height)
+        return None
+
+    b64 = _image_to_base64_png(image)
+    client = _get_client()
+    resp = _call_with_retry(client, b64)
+
+    text = "".join(
+        block.text for block in resp.content if getattr(block, "type", None) == "text"
+    ).strip()
+
+    if not text:
+        return None
+    if _NOT_CHART_RE.search(text):
+        return None
+    return text
+
+
+def _call_with_retry(client: Anthropic, b64_image: str):
+    """Send the vision request with exponential backoff on transient failures.
+
+    Retries `APIConnectionError`, `RateLimitError`, and 5xx `APIStatusError`.
+    Re-raises 4xx errors (auth, payload too large, etc.) immediately — those
+    do not improve with retry.
+    """
+    delay = INITIAL_BACKOFF_SECONDS
+    last_err: Exception | None = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            _pace_requests()
+            return client.messages.create(
+                model=VISION_MODEL,
+                max_tokens=MAX_TOKENS,
+                temperature=0.0,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": b64_image,
+                                },
+                            },
+                            {"type": "text", "text": VISION_PROMPT},
+                        ],
+                    }
+                ],
+            )
+        except (APIConnectionError, RateLimitError) as e:
+            last_err = e
+            if attempt == MAX_RETRIES:
+                break
+            retry_after = _retry_after_seconds(e)
+            if retry_after is not None:
+                delay = max(delay, retry_after)
+            logger.warning(
+                "Vision call retry %d/%d after %s: sleeping %.1fs",
+                attempt, MAX_RETRIES, type(e).__name__, delay,
+            )
+            time.sleep(delay)
+            delay *= 2
+        except APIStatusError as e:
+            # Retry 429 and 5xx. Other 4xx are caller faults; bail immediately.
+            status = e.status_code
+            if status not in (429,) and (status is None or status < 500):
+                raise
+            last_err = e
+            if attempt == MAX_RETRIES:
+                break
+            retry_after = _retry_after_seconds(e)
+            if retry_after is not None:
+                delay = max(delay, retry_after)
+            logger.warning(
+                "Vision call retry %d/%d after HTTP %s: sleeping %.1fs",
+                attempt, MAX_RETRIES, e.status_code, delay,
+            )
+            time.sleep(delay)
+            delay *= 2
+
+    assert last_err is not None
+    raise last_err
+
+
+def _pace_requests() -> None:
+    """Enforce a minimum gap between outbound vision requests."""
+    global _last_request_ts
+    now = time.monotonic()
+    elapsed = now - _last_request_ts
+    if elapsed < MIN_REQUEST_INTERVAL_SECONDS:
+        time.sleep(MIN_REQUEST_INTERVAL_SECONDS - elapsed)
+    _last_request_ts = time.monotonic()
+
+
+def _retry_after_seconds(err: Exception) -> float | None:
+    """Extract Retry-After header when present."""
+    response = getattr(err, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    retry_after = headers.get("retry-after") or headers.get("Retry-After")
+    if retry_after is None:
+        return None
+    try:
+        value = float(retry_after)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, value)
