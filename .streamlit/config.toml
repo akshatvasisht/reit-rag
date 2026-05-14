@@ -1,0 +1,14 @@
+[theme]
+base = "light"
+primaryColor = "#0B5FFF"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F6F8FC"
+textColor = "#0F172A"
+font = "sans serif"
+baseFontSize = 16
+
+[server]
+headless = true
+# Bind to localhost only — the demo is single-user and not meant to be reachable
+# from other hosts on the network.
+address = "127.0.0.1"

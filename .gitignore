@@ -1,0 +1,30 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Data & artifacts
+agentcontext/
+data/pdfs/
+*.log
+.cache/
+
+# Streamlit
+/.streamlit/secrets.toml
+
+# Editor cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
+.claude/
