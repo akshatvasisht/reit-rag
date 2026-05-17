@@ -17,6 +17,7 @@ __pycache__/
 agentcontext/
 data/pdfs/
 *.log
+logs/
 .cache/
 
 # Streamlit

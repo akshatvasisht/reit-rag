@@ -1,6 +1,6 @@
 # Corporate RAG Assessment
 
-Agent-facing rules for this repository. Keep this file short and load-bearing.
+Agent-facing rules for this repository. Keep this file short and essential.
 
 ## Read First
 

@@ -20,7 +20,7 @@ Retrieval-augmented question answering over 10 REIT documents (investor presenta
 
 ## Database
 
-PostgreSQL with the pgvector extension, run locally via Docker. Each chunk row carries dense (`halfvec(1024)`) and lexical (`tsvector`) representations in the same table; HNSW index on the embedding column, GIN index on the tsvector. Storing both signals in one database removes the need for a separate vector store and keeps version-aware filtering as a plain SQL `WHERE`. Production path is Snowflake Cortex Search — the metadata schema and retrieval logic carry over unchanged.
+PostgreSQL with the pgvector extension, run locally via Docker. Each chunk row carries dense (`halfvec(1024)`) and lexical (`tsvector`) representations in the same table; HNSW index on the embedding column, GIN index on the tsvector. Storing both signals in one database removes the need for a separate vector store and keeps version-aware filtering as a plain SQL `WHERE`. The metadata schema and retrieval logic are storage-layer-agnostic, so a managed vector store can replace pgvector without changes upstream.
 
 ## Chunking Strategy
 
@@ -32,7 +32,7 @@ Hybrid: BM25 (PostgreSQL tsvector) and dense (Qwen3-Embedding-0.6B + pgvector HN
 
 ## Versioning
 
-Documents are grouped into version chains by `(company, doc_type)`, ordered by `report_date`. An intent classifier reads the query for `latest` (default), `historical`, or `comparison` triggers. For `latest` intent, version-chain dedup suppresses older versions before the LLM sees context, so the model never silently averages between (for example) DLR's December 2025 and March 2026 figures. For `comparison` intent ("how did DLR change between Dec and Mar"), both versions are retained and the answer surfaces each with its date in the citation.
+Documents are grouped into version groups by `(company, doc_type)`, ordered by `report_date`. An intent classifier reads the query for `latest` (default), `historical`, or `comparison` triggers. For `latest` intent, version-group deduplication suppresses older versions before the LLM sees context, so the model never silently averages between (for example) DLR's December 2025 and March 2026 figures. For `comparison` intent ("how did DLR change between Dec and Mar"), both versions are retained and the answer surfaces each with its date in the citation.
 
 ## Conflicting Information
 
@@ -40,7 +40,33 @@ When the retrieved context contains figures that disagree across sources, the sy
 
 ## Charts and Tables
 
-Tables are extracted cell-by-cell by Docling's TableFormer and indexed as `content_type='table'` chunks. Charts are handled by a second-pass enrichment script: each Docling-detected `PictureItem` is sent to Claude vision with a structured extraction prompt covering chart type, title, axes, data series, key values, and a one-line insight. Decorative images are filtered out via a `NOT_CHART` sentinel response. Chart-derived chunks are tagged `content_type='chart_description'` so the UI can surface that the value came from vision extraction rather than text. When the vision model hedges or refuses, the system falls back to honest abstention with the page cited.
+Tables are extracted cell-by-cell by Docling's TableFormer and indexed as `content_type='table'` chunks. Charts are handled by a second-pass enrichment script: each Docling-detected `PictureItem` is sent to Claude vision with a structured extraction prompt covering chart type, title, axes, data series, key values, and a one-line insight. Decorative images are filtered out via a `NOT_CHART` sentinel response. Chart-derived chunks are tagged `content_type='chart_description'` so the UI can surface that the value came from vision extraction rather than text. When the vision model hedges or refuses, the system falls back to abstention with the page cited.
+
+## Retrieval Confidence
+
+After reranking, the pipeline computes a composite evidence-quality score in [0, 1] that quantifies how trustworthy the retrieved context is. This score is distinct from the binary abstain gate: abstain fires when the top rerank score falls below `RERANK_THRESHOLD`; confidence operates only on the answerable band above that threshold.
+
+### Three-signal composite
+
+| Signal | Weight | Description |
+|---|---|---|
+| Score gap | 0.50 | Normalised difference between the top-1 and top-2 reranker scores. A large gap indicates the best chunk is clearly better than the runner-up. |
+| Score magnitude | 0.30 | Sigmoid-mapped top-1 reranker logit, centred at −2.0. Maps the −5→+2 logit range to roughly 0.18→0.88. |
+| Entity coverage | 0.20 | Fraction of returned chunks belonging to an expected company. 1.0 when no entity filter is active (corpus-wide query). |
+
+The weighted sum is clamped to [0, 1] and mapped to three display bands:
+
+| Band | Score range | Display |
+|---|---|---|
+| High | ≥ 0.75 | Green — "High confidence" |
+| Medium | 0.45 – 0.75 | Amber — "Medium confidence" with a verification caveat |
+| Low | < 0.45 | Red — "Low confidence" with a manual-review caveat |
+
+**Calibration note.** The 0.75 / 0.45 cutoffs and the 0.50 / 0.30 / 0.20 weights are uncalibrated initial values. To calibrate: run `scripts/evaluate.py --out report.md`, collect the per-query confidence values from the report, then redraw the cutoffs at the medians of correct / borderline / refused query groups. Refit weights by minimising band-label error on the evaluation set.
+
+For the all-company synthesis path (one sub-retrieval per corpus company), the cross-company score gap is not meaningful — each company was retrieved independently. Confidence is instead the mean of per-company magnitude signals for companies that returned scored chunks.
+
+Confidence is computed on the post-rerank chunk list, before conflict-chunk injection and sibling expansion, so synthetic scores assigned to conflict/sibling chunks do not skew the result.
 
 ## Known Limitations
 
@@ -57,7 +83,7 @@ Tables are extracted cell-by-cell by Docling's TableFormer and indexed as `conte
 - **Fine-tune the reranker on financial-domain pairs.** The cross-encoder's logit distribution skews negative for natural-language questions against passage-style chunks; a domain-tuned reranker would let the abstention threshold tighten without re-introducing false abstentions.
 - **Forward-looking-statement classifier at ingestion.** Currently the LLM is prompted to label "Management guided…"; a FinBERT-class classifier at ingestion would tag chunks with `statement_type: reported | guidance | risk_factor` and remove the inference burden from generation.
 - **Multi-pass chart faithfulness check.** A second vision call comparing extracted values against the chart image, flagging discrepancies before display.
-- **Multi-tenant access control.** Add a `tenant_id` column plus PostgreSQL row-level security policies; pattern is identical whether the storage layer is Docker or Snowflake.
+- **Multi-tenant access control.** Add a `tenant_id` column plus PostgreSQL row-level security policies; the pattern transfers cleanly to a managed vector store should the storage layer change later.
 
 ## Run
 
@@ -71,6 +97,15 @@ python scripts/migrate.py
 mkdir -p data/pdfs && cp /path/to/provided/*.pdf data/pdfs/   # 10 corpus PDFs
 python scripts/ingest.py
 python scripts/enrich_charts.py
+
+# Optional back-fills (needed for full feature set; see agentcontext/DEFERRED.md
+# for cost and ordering):
+python scripts/reclassify_subtypes.py        # populate doc_subtype
+python scripts/reclassify_page_content.py    # populate page_content_class
+python scripts/contextualize.py --batch      # Batches API: contextualized text
+python scripts/contextualize.py --embed      # Qwen3 re-embed; activation gate
+python scripts/extract_claims.py             # populate chunk_claims (M4 verification pass)
+
 streamlit run app.py
 ```
 
