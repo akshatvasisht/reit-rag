@@ -1,187 +1,30 @@
 """Document-level metadata extraction for the REIT RAG corpus.
 
-Provides a hardcoded registry for the 10 known PDFs and a filename-based
-lookup that tolerates variation in capitalisation, separators, and date
-format.  Also provides a lightweight content-type classifier for the
-parser's per-chunk heuristics.
+Provides a registry for the known PDFs and a filename-based lookup that
+tolerates variation in capitalisation, separators, and date format.  Also
+provides a lightweight content-type classifier for the parser's per-chunk
+heuristics, and an LLM-backed subtype classifier.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
 from pathlib import PurePath
-from typing import Any
+from typing import Any, Optional
 
 from src.models import ContentType, DocumentMeta
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Corpus registry
+# Corpus registry — re-exported for backward compatibility.
+# The authoritative list lives in src.corpus.registry; the seed bootstrap is
+# in src.ingestion._registry_seed.
 # ---------------------------------------------------------------------------
-# Each entry covers one *logical* document group.
-# Entries without version multiplicity use "versions": None and carry their
-# metadata at the top level.  Entries with version multiplicity (DLR) carry
-# a "versions" dict keyed by an internal version id; the top-level company /
-# ticker / doc_type fields are shared across all versions.
-#
-# Schema per entry:
-#   keywords          – substrings that must appear (OR) in the stem to match
-#                       this company group
-#   doc_type          – "investor_presentation" | "thematic_report"
-#   company           – display name
-#   ticker            – exchange ticker
-#   versions          – None  → single version, metadata at top level
-#                       dict  → {version_id: {version_keywords, report_date,
-#                                              period_covered, doc_version,
-#                                              secondary_keywords}}
-#   report_date       – "YYYY-MM" (only when versions is None)
-#   period_covered    – human period label (only when versions is None)
-#   doc_version       – same as report_date (only when versions is None)
-#
-# Matching rules
-#   1. Stem is lower-cased.
-#   2. An entry matches if ANY keyword appears as a substring of the stem.
-#   3. For multi-version entries, the selected version is the first whose
-#      version_keywords all appear in the stem. If no version keyword
-#      matches, a ValueError is raised intentionally.
-#   4. BXP has two *separate* documents that share the same company but
-#      differ in doc_type / period_covered; each is its own top-level entry
-#      with a discriminating secondary keyword.
-# ---------------------------------------------------------------------------
-
-CORPUS_REGISTRY: list[dict[str, Any]] = [
-    # ------------------------------------------------------------------
-    # Digital Realty — two versions, version-conflict test case
-    # ------------------------------------------------------------------
-    {
-        "keywords": ["dlr", "digital realty", "digital_realty"],
-        "company": "Digital Realty",
-        "ticker": "DLR",
-        "doc_type": "investor_presentation",
-        "versions": {
-            "dec-2025": {
-                "version_keywords": ["dec", "december", "2025-12", "2025_12"],
-                "report_date": "2025-12",
-                "period_covered": "Q3 2025",
-                "doc_version": "2025-12",
-            },
-            "mar-2026": {
-                "version_keywords": ["mar", "march", "2026-03", "2026_03"],
-                "report_date": "2026-03",
-                "period_covered": "Q4 2025",
-                "doc_version": "2026-03",
-            },
-        },
-    },
-    # ------------------------------------------------------------------
-    # BXP — morning session deck (thematic/event, same company)
-    # ------------------------------------------------------------------
-    {
-        "keywords": ["bxp"],
-        "secondary_keywords": ["morning", "session", "morning_session"],
-        "company": "BXP",
-        "ticker": "BXP",
-        "doc_type": "investor_presentation",
-        "versions": None,
-        "report_date": "2025-12",
-        "period_covered": "Q4 2025",
-        "doc_version": "2025-12",
-    },
-    # ------------------------------------------------------------------
-    # BXP — investor presentation
-    # ------------------------------------------------------------------
-    {
-        "keywords": ["bxp"],
-        "secondary_keywords": ["q4", "investor", "presentation", "2025"],
-        "company": "BXP",
-        "ticker": "BXP",
-        "doc_type": "investor_presentation",
-        "versions": None,
-        "report_date": "2025-12",
-        "period_covered": "Q4 2025",
-        "doc_version": "2025-12",
-    },
-    # ------------------------------------------------------------------
-    # PSA (Public Storage) — company update (March 2026 cover)
-    # ------------------------------------------------------------------
-    {
-        "keywords": ["psa", "public storage", "public_storage"],
-        "secondary_keywords": ["update", "company_update", "company update"],
-        "company": "Public Storage",
-        "ticker": "PSA",
-        "doc_type": "investor_presentation",
-        "versions": None,
-        "report_date": "2026-03",
-        "period_covered": "Q4 2025",
-        "doc_version": "2026-03",
-    },
-    # ------------------------------------------------------------------
-    # PSA (Public Storage) — merger presentation (March 16, 2026 cover)
-    # ------------------------------------------------------------------
-    {
-        "keywords": ["psa", "public storage", "public_storage"],
-        "secondary_keywords": ["merger", "acquisition", "acq"],
-        "company": "Public Storage",
-        "ticker": "PSA",
-        "doc_type": "investor_presentation",
-        "versions": None,
-        "report_date": "2026-03",
-        "period_covered": "Q4 2025",
-        "doc_version": "2026-03",
-    },
-    # ------------------------------------------------------------------
-    # VICI Properties — investor presentation
-    # ------------------------------------------------------------------
-    {
-        "keywords": ["vici"],
-        "company": "VICI Properties",
-        "ticker": "VICI",
-        "doc_type": "investor_presentation",
-        "versions": None,
-        "report_date": "2026-03",
-        "period_covered": "Q4 2025",
-        "doc_version": "2026-03",
-    },
-    # ------------------------------------------------------------------
-    # Realty Income — investor presentation (February 2026 cover)
-    # ------------------------------------------------------------------
-    {
-        "keywords": ["realty income", "realty incom", "realty_income", "rlt", "o_corp"],
-        "company": "Realty Income",
-        "ticker": "O",
-        "doc_type": "investor_presentation",
-        "versions": None,
-        "report_date": "2026-02",
-        "period_covered": "Q4 2025",
-        "doc_version": "2026-02",
-    },
-    # ------------------------------------------------------------------
-    # EastGroup Properties — roadshow deck (February 2026 cover)
-    # ------------------------------------------------------------------
-    {
-        "keywords": ["eastgroup", "east_group", "egp"],
-        "company": "EastGroup Properties",
-        "ticker": "EGP",
-        "doc_type": "investor_presentation",
-        "versions": None,
-        "report_date": "2026-02",
-        "period_covered": "2026",
-        "doc_version": "2026-02",
-    },
-    # ------------------------------------------------------------------
-    # Simon Property Group — thematic report (November 2018 colophon)
-    # ------------------------------------------------------------------
-    {
-        "keywords": ["simon", "spg"],
-        "company": "Simon Property Group",
-        "ticker": "SPG",
-        "doc_type": "thematic_report",
-        "versions": None,
-        "report_date": "2018-11",
-        "period_covered": "2017-2018",
-        "doc_version": "2018-11",
-    },
-]
+from src.corpus.registry import CORPUS_REGISTRY  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +138,140 @@ def extract_document_meta(pdf_path: str | PurePath) -> DocumentMeta:
         doc_version=entry["doc_version"],
         source_path=source,
     )
+
+
+# ---------------------------------------------------------------------------
+# Document subtype classifier
+# ---------------------------------------------------------------------------
+
+# Enum values that the LLM may return.
+_VALID_SUBTYPES = {
+    "quarterly_investor_deck",
+    "investor_day_session",
+    "merger_presentation",
+    "company_update",
+    "annual_supplement",
+    "thematic_report",
+    "roadshow_deck",
+    "unknown",
+}
+
+# Minimum LLM confidence to accept a classification; anything below falls
+# back to "unknown" rather than propagating a low-confidence guess.
+_SUBTYPE_CONFIDENCE_THRESHOLD = 0.75
+
+# JSON schema that constrains the LLM response shape.
+SUBTYPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "doc_subtype": {
+            "type": "string",
+            "enum": list(_VALID_SUBTYPES),
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+        },
+    },
+    "required": ["doc_subtype", "confidence"],
+    "additionalProperties": False,
+}
+
+# One-shot prompt with per-subtype definitions and examples.
+_SUBTYPE_PROMPT = """Classify the following REIT document into exactly one subtype.
+
+Subtypes and their definitions:
+- "quarterly_investor_deck": Standard quarterly earnings/supplemental investor presentation (e.g., Q4 2025 Investor Presentation)
+- "investor_day_session": Investor Day or analyst day session deck (e.g., morning session, afternoon workshop)
+- "merger_presentation": Merger, acquisition, or strategic combination deck
+- "company_update": General company update or overview not tied to a specific quarter (e.g., "Company Update March 2026")
+- "annual_supplement": Annual data supplement, statistical supplement, or full-year data book
+- "thematic_report": Thematic, sector, or ESG report not primarily an earnings deck (e.g., "Retail Real Estate Outlook 2018")
+- "roadshow_deck": Equity or debt roadshow marketing deck
+- "unknown": Cannot be determined from available information
+
+Document details:
+  filename: {filename}
+  doc_type: {doc_type}
+  first page text (truncated to 500 tokens):
+  ---
+  {first_page_text}
+  ---
+
+Return a JSON object with:
+  "doc_subtype": one of the values above
+  "confidence": float in [0.0, 1.0]"""
+
+_subtype_client: Optional[Any] = None
+
+
+def _get_subtype_client() -> Any:
+    """Return a module-level Anthropic client, creating it on first use."""
+    global _subtype_client
+    if _subtype_client is None:
+        from anthropic import Anthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set")
+        _subtype_client = Anthropic(api_key=api_key)
+    return _subtype_client
+
+
+def classify_doc_subtype(
+    first_page_text: str,
+    filename: str,
+    doc_type: str,
+) -> str:
+    """Classify a document's granular subtype using Claude Haiku.
+
+    Sends the first ~500 tokens of page-one text, the filename, and the
+    coarse doc_type to the model and returns a fine-grained subtype string.
+    Returns ``"unknown"`` when confidence is below 0.75 or when the API call
+    fails — callers never need to handle exceptions from this function.
+
+    Args:
+        first_page_text: Text from the document's first page (may be truncated).
+        filename: The source PDF filename, used as a strong hint.
+        doc_type: Coarse document type already assigned (e.g. "investor_presentation").
+
+    Returns:
+        One of the values in ``_VALID_SUBTYPES``.
+    """
+    # Truncate first-page text to roughly 500 tokens (≈2000 chars at ~4 chars/token).
+    truncated = first_page_text[:2000]
+
+    prompt = _SUBTYPE_PROMPT.format(
+        filename=filename,
+        doc_type=doc_type,
+        first_page_text=truncated,
+    )
+
+    try:
+        client = _get_subtype_client()
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=100,
+            temperature=0.0,
+            top_k=1,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(
+            block.text
+            for block in response.content
+            if getattr(block, "type", None) == "text"
+        ).strip()
+        result = json.loads(text)
+        subtype = result.get("doc_subtype", "unknown")
+        confidence = float(result.get("confidence", 0.0))
+
+        if confidence < _SUBTYPE_CONFIDENCE_THRESHOLD or subtype not in _VALID_SUBTYPES:
+            return "unknown"
+        return subtype
+
+    except Exception:  # noqa: BLE001
+        logger.debug("classify_doc_subtype failed for %s; returning 'unknown'", filename)
+        return "unknown"
 
 
 # Precompiled marker pattern for classify_content_type
