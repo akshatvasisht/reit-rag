@@ -154,7 +154,7 @@ def answer(query: str) -> Answer:
 
     ooc_issues: list[dict] = []
     if not structured.abstain:
-        from src.corpus.registry import CORPUS_REGISTRY  # noqa: PLC0415
+        from src.corpus_registry import CORPUS_REGISTRY  # noqa: PLC0415
         corpus_companies = sorted({e["company"] for e in CORPUS_REGISTRY})
         ooc_issues = check_ooc_entity_attribution(structured, query, corpus_companies)
         structured.ooc_attribution_issues = ooc_issues
@@ -301,7 +301,7 @@ def answer_structured(query: str) -> Answer:
 
     ooc_issues_structured: list[dict] = []
     if not structured.abstain:
-        from src.corpus.registry import CORPUS_REGISTRY  # noqa: PLC0415
+        from src.corpus_registry import CORPUS_REGISTRY  # noqa: PLC0415
         corpus_companies = sorted({e["company"] for e in CORPUS_REGISTRY})
         ooc_issues_structured = check_ooc_entity_attribution(structured, query, corpus_companies)
         structured.ooc_attribution_issues = ooc_issues_structured

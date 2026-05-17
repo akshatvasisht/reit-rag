@@ -19,7 +19,7 @@ from pathlib import Path
 # Allow running as a script without -m
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.corpus.registry import get_registry
+from src.corpus_registry import get_registry
 from src.db import connect
 from src.ingestion.chunker import chunk_document, classify_page_content
 from src.ingestion.embedder import embed_chunks

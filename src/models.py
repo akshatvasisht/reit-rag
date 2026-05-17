@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Literal, Optional, Sequence
 from uuid import UUID, uuid4
 
 
@@ -100,6 +100,38 @@ class Chunk:
     doc_subtype: str = "unknown"  # granular subtype within doc_type; flows from DocumentMeta
     page_content_class: str = "unknown"  # page-level content classification for boilerplate filtering
     id: UUID = field(default_factory=uuid4)
+
+    @classmethod
+    def from_row(cls, row: Sequence[Any], columns: list[str]) -> "Chunk":
+        """Hydrate a Chunk from a psycopg result row plus its column names."""
+        r: dict[str, Any] = dict(zip(columns, row))
+
+        def _uuid(val: Any) -> Optional[UUID]:
+            if val is None:
+                return None
+            return val if isinstance(val, UUID) else UUID(str(val))
+
+        return cls(
+            id=_uuid(r["id"]),  # type: ignore[arg-type]
+            document_id=_uuid(r["document_id"]),  # type: ignore[arg-type]
+            parent_chunk_id=_uuid(r["parent_chunk_id"]),
+            company=r["company"],
+            ticker=r["ticker"],
+            doc_type=r["doc_type"],
+            report_date=r["report_date"],
+            period_covered=r.get("period_covered"),
+            doc_version=r["doc_version"],
+            section_title=r.get("section_title"),
+            page_number=r.get("page_number"),
+            content_type=r["content_type"],
+            source_authority=r["source_authority"],
+            chunk_text=r["chunk_text"],
+            is_parent=r["is_parent"],
+            token_count=r.get("token_count"),
+            doc_subtype=r.get("doc_subtype", "unknown") or "unknown",
+            page_content_class=r.get("page_content_class", "unknown") or "unknown",
+            embedding=None,  # never returned from retrieval queries for efficiency
+        )
 
 
 @dataclass

@@ -38,8 +38,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pgvector.psycopg import register_vector
 
 from src.db import connect
-from src.ingestion.contextualizer import CONTEXT_MODEL, _INSTRUCTION
 from src.ingestion.embedder import _get_model as _get_embedder, EMBED_DIMS
+
+
+# Haiku 4.5 supports prompt caching and is ~5x cheaper than Sonnet for the
+# short-summary task this prompt expects.
+CONTEXT_MODEL = "claude-haiku-4-5-20251001"
+
+# Instruction body, verbatim from Anthropic's published Contextual Retrieval example.
+_INSTRUCTION = (
+    "Here is the chunk to situate within the full document:\n"
+    "<chunk>\n{chunk}\n</chunk>\n\n"
+    "Please give a short succinct context to situate this chunk within the overall "
+    "document for the purposes of improving search retrieval of the chunk. Answer "
+    "only with the succinct context and nothing else."
+)
 
 
 logging.basicConfig(

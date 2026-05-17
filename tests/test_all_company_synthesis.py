@@ -10,7 +10,8 @@ from uuid import uuid4
 import pytest
 
 from src.models import Chunk, RetrievedChunk
-from src.retrieval.pipeline import RetrievalResult, retrieve_all_company_synthesis
+from src.retrieval.pipeline import RetrievalResult
+from src.retrieval.synthesis import retrieve_all_company_synthesis
 from src.versioning.chains import dedupe_by_version_group
 from src.versioning.classifier import _regex_classify_intent, classify_intent
 
@@ -167,8 +168,8 @@ def test_retrieve_all_company_synthesis_merges_per_company_chunks() -> None:
 
     mock_conn = MagicMock()
 
-    with patch("src.retrieval.pipeline.CORPUS_REGISTRY", [{"company": c} for c in companies]):
-        with patch("src.retrieval.pipeline._retrieve_single_company", side_effect=mock_retrieve):
+    with patch("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies]):
+        with patch("src.retrieval.synthesis._retrieve_single_company", side_effect=mock_retrieve):
             result = retrieve_all_company_synthesis("NOI across all", mock_conn)
 
     assert len(result.contexts) == 3
@@ -186,8 +187,8 @@ def test_retrieve_all_company_synthesis_abstains_when_all_below_threshold() -> N
 
     mock_conn = MagicMock()
 
-    with patch("src.retrieval.pipeline.CORPUS_REGISTRY", [{"company": c} for c in companies]):
-        with patch("src.retrieval.pipeline._retrieve_single_company", side_effect=mock_retrieve):
+    with patch("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies]):
+        with patch("src.retrieval.synthesis._retrieve_single_company", side_effect=mock_retrieve):
             result = retrieve_all_company_synthesis("NOI across all", mock_conn)
 
     assert result.abstain is True
@@ -206,8 +207,8 @@ def test_retrieve_all_company_synthesis_not_abstain_when_one_above_threshold() -
 
     mock_conn = MagicMock()
 
-    with patch("src.retrieval.pipeline.CORPUS_REGISTRY", [{"company": c} for c in companies]):
-        with patch("src.retrieval.pipeline._retrieve_single_company", side_effect=mock_retrieve):
+    with patch("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies]):
+        with patch("src.retrieval.synthesis._retrieve_single_company", side_effect=mock_retrieve):
             result = retrieve_all_company_synthesis("NOI across all", mock_conn)
 
     assert result.abstain is False
@@ -234,8 +235,8 @@ def test_retrieve_all_company_synthesis_deduplicates_shared_chunk() -> None:
 
     mock_conn = MagicMock()
 
-    with patch("src.retrieval.pipeline.CORPUS_REGISTRY", [{"company": c} for c in companies]):
-        with patch("src.retrieval.pipeline._retrieve_single_company", side_effect=mock_retrieve):
+    with patch("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies]):
+        with patch("src.retrieval.synthesis._retrieve_single_company", side_effect=mock_retrieve):
             result = retrieve_all_company_synthesis("NOI across all", mock_conn)
 
     # Deduplication: same chunk UUID → appears exactly once.
@@ -347,7 +348,7 @@ def test_retrieve_all_company_synthesis_calls_expand_to_parents(monkeypatch) -> 
     from src.retrieval import pipeline as pl
 
     companies = ["Alpha REIT", "Beta REIT"]
-    monkeypatch.setattr(pl, "CORPUS_REGISTRY", [{"company": c} for c in companies])
+    monkeypatch.setattr("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies])
 
     alpha_chunk = _make_chunk(company="Alpha REIT")
     beta_chunk = _make_chunk(company="Beta REIT")
@@ -366,7 +367,7 @@ def test_retrieve_all_company_synthesis_calls_expand_to_parents(monkeypatch) -> 
         expand_parents_calls.append(len(chunks))
         return list(chunks)
 
-    monkeypatch.setattr(pl, "_retrieve_single_company", _fake_single)
+    monkeypatch.setattr("src.retrieval.synthesis._retrieve_single_company", _fake_single)
     monkeypatch.setattr(pl, "expand_to_parents", _fake_expand_parents)
     monkeypatch.setattr(pl, "find_conflicting_chunks", lambda r, cf, conn: list(r))
     monkeypatch.setattr(pl, "expand_to_siblings", lambda chunks, conn: list(chunks))
@@ -382,7 +383,7 @@ def test_retrieve_all_company_synthesis_calls_find_conflicting_chunks(monkeypatc
     from src.retrieval import pipeline as pl
 
     companies = ["Alpha REIT"]
-    monkeypatch.setattr(pl, "CORPUS_REGISTRY", [{"company": c} for c in companies])
+    monkeypatch.setattr("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies])
 
     chunk = _make_chunk(company="Alpha REIT")
 
@@ -400,7 +401,7 @@ def test_retrieve_all_company_synthesis_calls_find_conflicting_chunks(monkeypatc
         conflict_calls.append(len(retained))
         return list(retained)
 
-    monkeypatch.setattr(pl, "_retrieve_single_company", _fake_single)
+    monkeypatch.setattr("src.retrieval.synthesis._retrieve_single_company", _fake_single)
     monkeypatch.setattr(pl, "find_conflicting_chunks", _fake_conflict)
     monkeypatch.setattr(pl, "expand_to_parents", lambda chunks, conn: list(chunks))
     monkeypatch.setattr(pl, "expand_to_siblings", lambda chunks, conn: list(chunks))
@@ -416,7 +417,7 @@ def test_retrieve_all_company_synthesis_calls_expand_to_siblings(monkeypatch) ->
     from src.retrieval import pipeline as pl
 
     companies = ["Alpha REIT"]
-    monkeypatch.setattr(pl, "CORPUS_REGISTRY", [{"company": c} for c in companies])
+    monkeypatch.setattr("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies])
 
     chunk = _make_chunk(company="Alpha REIT")
 
@@ -434,7 +435,7 @@ def test_retrieve_all_company_synthesis_calls_expand_to_siblings(monkeypatch) ->
         sibling_calls.append(len(chunks))
         return list(chunks)
 
-    monkeypatch.setattr(pl, "_retrieve_single_company", _fake_single)
+    monkeypatch.setattr("src.retrieval.synthesis._retrieve_single_company", _fake_single)
     monkeypatch.setattr(pl, "find_conflicting_chunks", lambda r, cf, conn: list(r))
     monkeypatch.setattr(pl, "expand_to_parents", lambda chunks, conn: list(chunks))
     monkeypatch.setattr(pl, "expand_to_siblings", _fake_siblings)
@@ -450,7 +451,7 @@ def test_retrieve_all_company_synthesis_parent_chunks_reach_llm(monkeypatch) -> 
     from src.retrieval import pipeline as pl
 
     companies = ["Alpha REIT"]
-    monkeypatch.setattr(pl, "CORPUS_REGISTRY", [{"company": c} for c in companies])
+    monkeypatch.setattr("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies])
 
     child_chunk = _make_chunk(company="Alpha REIT", chunk_text="child chunk text")
     parent_chunk = _make_chunk(company="Alpha REIT", chunk_text="parent chunk text (expanded)")
@@ -469,7 +470,7 @@ def test_retrieve_all_company_synthesis_parent_chunks_reach_llm(monkeypatch) -> 
         # Return the parent chunk instead of the child
         return [parent_rc]
 
-    monkeypatch.setattr(pl, "_retrieve_single_company", _fake_single)
+    monkeypatch.setattr("src.retrieval.synthesis._retrieve_single_company", _fake_single)
     monkeypatch.setattr(pl, "find_conflicting_chunks", lambda r, cf, conn: list(r))
     monkeypatch.setattr(pl, "expand_to_parents", _fake_expand_parents)
     monkeypatch.setattr(pl, "expand_to_siblings", lambda chunks, conn: list(chunks))
@@ -488,7 +489,7 @@ def test_retrieve_all_company_synthesis_cap_enforced(monkeypatch) -> None:
 
     # Use a small, controlled company set to have a predictable cap
     companies = [f"Company {i}" for i in range(3)]
-    monkeypatch.setattr(pl, "CORPUS_REGISTRY", [{"company": c} for c in companies])
+    monkeypatch.setattr("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies])
     # Cap = 3 * 3 = 9; we will produce more than 9 chunks
 
     per_company_top_k = 10  # exceeds cap/3 so total will exceed cap
@@ -510,7 +511,7 @@ def test_retrieve_all_company_synthesis_cap_enforced(monkeypatch) -> None:
         )
 
     # No-op expand/conflict so only the cap logic matters
-    monkeypatch.setattr(pl, "_retrieve_single_company", _fake_single)
+    monkeypatch.setattr("src.retrieval.synthesis._retrieve_single_company", _fake_single)
     monkeypatch.setattr(pl, "find_conflicting_chunks", lambda r, cf, conn: list(r))
     monkeypatch.setattr(pl, "expand_to_parents", lambda chunks, conn: list(chunks))
     monkeypatch.setattr(pl, "expand_to_siblings", lambda chunks, conn: list(chunks))

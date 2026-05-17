@@ -12,8 +12,7 @@ from typing import Optional
 import psycopg
 
 from src.db import connect
-from src.models import RetrievedChunk
-from src.retrieval._common import _row_to_chunk
+from src.models import Chunk, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +159,7 @@ def bm25_search(
 
         results: list[RetrievedChunk] = []
         for rank, row in enumerate(rows, start=1):
-            chunk = _row_to_chunk(row, columns)
+            chunk = Chunk.from_row(row, columns)
             results.append(RetrievedChunk(chunk=chunk, bm25_rank=rank))
 
         logger.debug("BM25 returned %d chunks", len(results))

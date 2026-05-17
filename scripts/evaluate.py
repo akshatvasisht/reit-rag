@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.generation.citation_check import check_ooc_entity_attribution
 from src.generation.generator import Answer, answer
-from src.corpus.registry import CORPUS_REGISTRY
+from src.corpus_registry import CORPUS_REGISTRY
 from src.retrieval.pipeline import RetrievalResult, confidence_band, retrieve
 from tests.evaluation_set import EVALUATION_SET, EvaluationQuery
 

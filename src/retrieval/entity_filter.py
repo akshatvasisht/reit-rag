@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
-from src.corpus.registry import CORPUS_REGISTRY
+from src.corpus_registry import CORPUS_REGISTRY
 
 # ---------------------------------------------------------------------------
 # OOC entity candidate extraction — regex-based, corpus-agnostic

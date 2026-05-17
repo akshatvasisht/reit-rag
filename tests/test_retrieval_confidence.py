@@ -14,10 +14,9 @@ from uuid import uuid4
 import pytest
 
 from src.models import Chunk, RetrievedChunk
-from src.retrieval.pipeline import (
+from src.retrieval.confidence import (
     CONFIDENCE_HIGH_CUTOFF,
     CONFIDENCE_LOW_CUTOFF,
-    RetrievalResult,
     W_COVERAGE,
     W_GAP,
     W_MAGNITUDE,
@@ -27,6 +26,7 @@ from src.retrieval.pipeline import (
     compute_retrieval_confidence,
     confidence_band,
 )
+from src.retrieval.pipeline import RetrievalResult
 from src.retrieval.reranker import RERANK_THRESHOLD
 
 
@@ -333,7 +333,7 @@ def test_synthesis_confidence_mean_of_magnitudes(monkeypatch) -> None:
     from src.retrieval import pipeline as pl
 
     companies = ["Alpha REIT", "Beta REIT"]
-    monkeypatch.setattr(pl, "CORPUS_REGISTRY", [{"company": c} for c in companies])
+    monkeypatch.setattr("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": c} for c in companies])
 
     alpha_rc = _make_rc(score=2.0, company="Alpha REIT")
     beta_rc = _make_rc(score=-1.0, company="Beta REIT")
@@ -349,7 +349,7 @@ def test_synthesis_confidence_mean_of_magnitudes(monkeypatch) -> None:
             diagnostics={"top_rerank": rc.rerank_score},
         )
 
-    monkeypatch.setattr(pl, "_retrieve_single_company", _fake_single)
+    monkeypatch.setattr("src.retrieval.synthesis._retrieve_single_company", _fake_single)
 
     conn = MagicMock()
     result = pl.retrieve_all_company_synthesis("Compare all companies", conn)
@@ -361,7 +361,7 @@ def test_synthesis_confidence_mean_of_magnitudes(monkeypatch) -> None:
 def test_synthesis_confidence_zero_when_all_abstain(monkeypatch) -> None:
     from src.retrieval import pipeline as pl
 
-    monkeypatch.setattr(pl, "CORPUS_REGISTRY", [{"company": "Alpha REIT"}])
+    monkeypatch.setattr("src.retrieval.synthesis.CORPUS_REGISTRY", [{"company": "Alpha REIT"}])
 
     def _fake_single(query, company, conn, top_k=3):
         return pl.RetrievalResult(
@@ -373,7 +373,7 @@ def test_synthesis_confidence_zero_when_all_abstain(monkeypatch) -> None:
             diagnostics={"top_rerank": float("-inf")},
         )
 
-    monkeypatch.setattr(pl, "_retrieve_single_company", _fake_single)
+    monkeypatch.setattr("src.retrieval.synthesis._retrieve_single_company", _fake_single)
 
     conn = MagicMock()
     result = pl.retrieve_all_company_synthesis("Compare all", conn)
