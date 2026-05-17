@@ -6,7 +6,7 @@ from scripts import evaluate
 from src.models import Chunk, RetrievedChunk
 from src.retrieval import pipeline as retrieval_pipeline
 from src.retrieval.pipeline import RetrievalResult
-from tests.golden_set import GoldenQuery
+from tests.evaluation_set import EvaluationQuery
 
 
 def _fake_retrieve(query: str) -> RetrievalResult:
@@ -41,9 +41,9 @@ def test_run_ablation_no_entity_filter_changes_behavior(monkeypatch) -> None:
     monkeypatch.setattr(retrieval_pipeline, "retrieve", _fake_retrieve)
     monkeypatch.setattr(
         evaluate,
-        "GOLDEN_SET",
+        "EVALUATION_SET",
         [
-            GoldenQuery(
+            EvaluationQuery(
                 id="t01",
                 query="What is BXP leverage?",
                 category="factual_citation",
@@ -59,7 +59,7 @@ def test_run_ablation_no_entity_filter_changes_behavior(monkeypatch) -> None:
     no_entity = out["no_entity_filter"][0]
 
     assert baseline.top_n_companies == ["BXP"]
-    assert baseline.expected_company_in_top5 is True
+    assert baseline.expected_company_rank == 1
 
     assert no_entity.top_n_companies == ["NO_FILTER"]
-    assert no_entity.expected_company_in_top5 is False
+    assert no_entity.expected_company_rank is None

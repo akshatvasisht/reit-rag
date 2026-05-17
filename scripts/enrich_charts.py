@@ -34,7 +34,7 @@ from PIL import Image
 from docling_core.types.doc.document import PictureItem  # type: ignore
 
 from src.db import connect
-from src.ingestion.chart_extractor import extract_chart
+from src.ingestion.chart_extractor import build_chart_context_text, extract_chart
 from src.ingestion.embedder import embed_chunks
 from src.ingestion.parser import parse_pdf
 from src.ingestion.writer import write_chunks
@@ -48,6 +48,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("enrich")
 WRITE_BATCH_SIZE = 8
+
+# Images whose bounding box area (in Docling page-coordinate units) is below
+# this threshold are almost certainly logos, icons, or decorative photos rather
+# than data charts.  Skipping them avoids unnecessary vision API calls and the
+# noise that comes from sending non-chart images to the extractor.
+MIN_CHART_AREA_PX = 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -124,15 +130,39 @@ def _clear_enrichment_marker(doc_id: UUID) -> None:
         conn.commit()
 
 
-def _delete_chart_descriptions(doc_id: UUID) -> int:
+def _delete_chart_chunks(doc_id: UUID) -> int:
+    """Delete chart_description and chart_context chunks for the given document.
+
+    Both types are cleared together so a forced re-enrichment starts from a
+    clean slate regardless of which path previous enrichment took.
+    """
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
             "DELETE FROM chunks WHERE document_id = %s "
-            "AND content_type = 'chart_description'",
+            "AND content_type IN ('chart_description', 'chart_context')",
             (str(doc_id),),
         )
         conn.commit()
         return cur.rowcount
+
+
+def _is_likely_chart(picture_item) -> bool:
+    """Return True when the image bbox is large enough to plausibly be a chart.
+
+    Small bounding boxes indicate logos, icons, or decorative elements that
+    the vision model cannot extract meaningful data from.  Failing open (True)
+    when provenance or bbox is absent preserves the prior behavior.
+    """
+    provs = getattr(picture_item, "prov", None)
+    if not provs:
+        return True
+    bbox = getattr(provs[0], "bbox", None)
+    if bbox is None:
+        return True
+    width = bbox.r - bbox.l
+    height = bbox.b - bbox.t
+    area = width * height
+    return area >= MIN_CHART_AREA_PX
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +207,43 @@ def _flush_chunks(conn, pending_chunks: list[Chunk], company: str) -> int:
     embed_chunks(pending_chunks)
     written = write_chunks(conn, pending_chunks)
     conn.commit()
-    logger.info("  Persisted %d chart_description chunks for %s", written, company)
+    logger.info("  Persisted %d chart chunks for %s", written, company)
     pending_chunks.clear()
     return written
+
+
+def _collect_page_text(docling_doc, page: Optional[int]) -> list[str]:
+    """Collect the text content of non-picture items on a given page.
+
+    Used to populate the sibling-text section of chart_context fallback chunks
+    so the page remains findable even when chart extraction fails the confidence
+    gate.  Returns an empty list when page is None or no text items exist.
+    """
+    if page is None:
+        return []
+    texts: list[str] = []
+    try:
+        from docling_core.types.doc.document import TextItem  # type: ignore
+        for item, _ in docling_doc.iterate_items():
+            if isinstance(item, PictureItem):
+                continue
+            if not isinstance(item, TextItem):
+                continue
+            provs = getattr(item, "prov", None)
+            if not provs:
+                continue
+            try:
+                item_page = int(provs[0].page_no)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if item_page != page:
+                continue
+            text = getattr(item, "text", None) or ""
+            if text.strip():
+                texts.append(text.strip())
+    except Exception:  # noqa: BLE001 — sibling text is best-effort
+        pass
+    return texts
 
 
 def enrich_document(doc_row: dict, force: bool) -> int:
@@ -196,8 +260,8 @@ def enrich_document(doc_row: dict, force: bool) -> int:
 
     if existing and force:
         _clear_enrichment_marker(UUID(str(doc_id)))
-        n = _delete_chart_descriptions(doc_id)
-        logger.info("Force re-enrich: deleted %d prior chart_description chunks for %s", n, company)
+        n = _delete_chart_chunks(doc_id)
+        logger.info("Force re-enrich: deleted %d prior chart chunks for %s", n, company)
 
     logger.info("==== Enriching %s ====", source_path)
 
@@ -224,57 +288,110 @@ def enrich_document(doc_row: dict, force: bool) -> int:
     written_total = 0
     skipped_not_chart = 0
     skipped_no_image = 0
+    skipped_small = 0
+    fallback_created = 0
     extraction_errors = 0
 
     for i, (item, page) in enumerate(pictures, start=1):
+        # Pre-filter: skip images whose bbox is too small to be a data chart.
+        if not _is_likely_chart(item):
+            skipped_small += 1
+            logger.info(
+                "  Picture %d/%d on page %s: bbox too small, skipped",
+                i, len(pictures), page,
+            )
+            continue
+
         image = _picture_image(item, docling_doc)
         if image is None:
             skipped_no_image += 1
             continue
         try:
-            description = extract_chart(image)
+            description, needs_fallback = extract_chart(image)
         except Exception as e:  # noqa: BLE001 — log and continue processing the document
             extraction_errors += 1
             logger.warning("  Picture %d/%d on page %s: vision call failed (%s)",
                            i, len(pictures), page, type(e).__name__)
             continue
-        if description is None:
+
+        if description is None and not needs_fallback:
             skipped_not_chart += 1
             logger.info("  Picture %d/%d on page %s: NOT_CHART (skipped)",
                         i, len(pictures), page)
             continue
 
-        # Build a chart_description chunk. is_parent=False so the retrieval
-        # layer (which only queries children) picks it up. parent_chunk_id=None
-        # so the small-to-large expansion treats it as self-contained.
-        pending_chunks.append(
-            Chunk(
-                document_id=doc_meta.id,
-                company=doc_meta.company,
-                ticker=doc_meta.ticker,
-                doc_type=doc_meta.doc_type,
-                report_date=doc_meta.report_date,
-                doc_version=doc_meta.doc_version,
-                period_covered=doc_meta.period_covered,
-                source_authority="company_authored",
-                chunk_text=description,
-                content_type="chart_description",
+        if needs_fallback:
+            # Extraction produced output but it did not meet the confidence gate.
+            # Build an additive chart_context chunk so the page stays findable.
+            sibling_texts = _collect_page_text(docling_doc, page)
+            fallback_text = build_chart_context_text(
                 section_title=None,
-                page_number=page,
-                is_parent=False,
-                parent_chunk_id=None,
-                token_count=None,
+                sibling_texts=sibling_texts,
             )
-        )
-        logger.info("  Picture %d/%d on page %s: extracted (%d chars)",
-                    i, len(pictures), page, len(description))
+            pending_chunks.append(
+                Chunk(
+                    document_id=doc_meta.id,
+                    company=doc_meta.company,
+                    ticker=doc_meta.ticker,
+                    doc_type=doc_meta.doc_type,
+                    report_date=doc_meta.report_date,
+                    doc_version=doc_meta.doc_version,
+                    period_covered=doc_meta.period_covered,
+                    source_authority="company_authored",
+                    chunk_text=fallback_text,
+                    content_type="chart_context",
+                    section_title=None,
+                    page_number=page,
+                    is_parent=False,
+                    parent_chunk_id=None,
+                    token_count=None,
+                )
+            )
+            fallback_created += 1
+            logger.info(
+                "  Picture %d/%d on page %s: low-confidence — chart_context fallback created",
+                i, len(pictures), page,
+            )
+        else:
+            # Confident extraction: store as chart_description.
+            # is_parent=False so the retrieval layer (which only queries children)
+            # picks it up. parent_chunk_id=None so small-to-large expansion
+            # treats it as self-contained.
+            assert description is not None
+            pending_chunks.append(
+                Chunk(
+                    document_id=doc_meta.id,
+                    company=doc_meta.company,
+                    ticker=doc_meta.ticker,
+                    doc_type=doc_meta.doc_type,
+                    report_date=doc_meta.report_date,
+                    doc_version=doc_meta.doc_version,
+                    period_covered=doc_meta.period_covered,
+                    source_authority="company_authored",
+                    chunk_text=description,
+                    content_type="chart_description",
+                    section_title=None,
+                    page_number=page,
+                    is_parent=False,
+                    parent_chunk_id=None,
+                    token_count=None,
+                )
+            )
+            logger.info("  Picture %d/%d on page %s: extracted (%d chars)",
+                        i, len(pictures), page, len(description))
+
         if len(pending_chunks) >= WRITE_BATCH_SIZE:
             with connect() as conn:
                 written_total += _flush_chunks(conn, pending_chunks, company)
 
     logger.info(
-        "  Vision pass complete: %d charts extracted, %d skipped as NOT_CHART, %d no image",
-        written_total + len(pending_chunks), skipped_not_chart, skipped_no_image,
+        "  Vision pass complete: %d charts extracted, %d fallbacks, "
+        "%d skipped as NOT_CHART, %d too small, %d no image",
+        written_total + len(pending_chunks) - fallback_created,
+        fallback_created,
+        skipped_not_chart,
+        skipped_small,
+        skipped_no_image,
     )
 
     if pending_chunks:

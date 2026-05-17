@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS documents (
 ALTER TABLE documents
     ADD COLUMN IF NOT EXISTS chart_enrichment_completed_at TIMESTAMPTZ;
 
+ALTER TABLE documents
+    ADD COLUMN IF NOT EXISTS doc_subtype TEXT NOT NULL DEFAULT 'unknown';
+
 CREATE INDEX IF NOT EXISTS documents_chain_idx
     ON documents (company, doc_type, doc_version);
 
@@ -56,7 +59,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     doc_version       TEXT NOT NULL,
     section_title     TEXT,
     page_number       INTEGER,
-    content_type      TEXT NOT NULL CHECK (content_type IN ('text', 'table', 'chart_caption', 'chart_description', 'mixed')),
+    content_type      TEXT NOT NULL CHECK (content_type IN ('text', 'table', 'chart_caption', 'chart_description', 'chart_context', 'mixed')),
     source_authority  TEXT NOT NULL DEFAULT 'company_authored',
 
     -- Content
@@ -70,6 +73,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     contextualized_text       TEXT,
     contextualized_text_tsv   tsvector,
     contextualized_embedding  halfvec(1024),
+
+    -- Granular document subtype; populated after initial ingestion via
+    -- scripts/reclassify_subtypes.py or during re-ingestion.
+    doc_subtype       TEXT NOT NULL DEFAULT 'unknown',
 
     -- Role
     is_parent         BOOLEAN NOT NULL DEFAULT FALSE,
@@ -109,9 +116,11 @@ CREATE INDEX IF NOT EXISTS chunks_tsv_idx
     ON chunks USING GIN (chunk_text_tsv);
 
 -- HNSW on halfvec(1024); halfvec supports high-dimensional vectors for this model.
-CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
+-- ef_construction=200 yields higher recall at index-build time for production RAG workloads.
+DROP INDEX IF EXISTS chunks_embedding_hnsw;
+CREATE INDEX chunks_embedding_hnsw
     ON chunks USING hnsw (embedding halfvec_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
+    WITH (m = 16, ef_construction = 200);
 
 CREATE INDEX IF NOT EXISTS chunks_company_version_idx
     ON chunks (company, doc_version);
@@ -129,9 +138,58 @@ CREATE INDEX IF NOT EXISTS chunks_document_idx
 CREATE INDEX IF NOT EXISTS chunks_ctx_tsv_idx
     ON chunks USING GIN (contextualized_text_tsv);
 
-CREATE INDEX IF NOT EXISTS chunks_ctx_embed_hnsw
+-- ef_construction=200 matches the primary HNSW index for consistent recall.
+DROP INDEX IF EXISTS chunks_ctx_embed_hnsw;
+CREATE INDEX chunks_ctx_embed_hnsw
     ON chunks USING hnsw (contextualized_embedding halfvec_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
+    WITH (m = 16, ef_construction = 200);
+
+-- Additive: doc_subtype column for granular version-group keying.
+ALTER TABLE chunks
+    ADD COLUMN IF NOT EXISTS doc_subtype TEXT NOT NULL DEFAULT 'unknown';
+
+-- Additive: page-level content classification for boilerplate filtering.
+ALTER TABLE chunks
+    ADD COLUMN IF NOT EXISTS page_content_class TEXT NOT NULL DEFAULT 'unknown';
+
+-- Atomic numerical claims extracted from each chunk at ingestion time.
+-- Indexed by (company, metric) to support conflict-detection joins at
+-- query time without a full-table scan.
+CREATE TABLE IF NOT EXISTS chunk_claims (
+    claim_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chunk_id     UUID NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    company      TEXT NOT NULL,
+    doc_version  TEXT NOT NULL,
+    metric       TEXT NOT NULL,
+    value        TEXT NOT NULL,
+    period       TEXT,
+    page_number  INTEGER,
+    extracted_at TIMESTAMPTZ DEFAULT now()
+);
+
+ALTER TABLE chunk_claims ADD COLUMN IF NOT EXISTS value_qualifier TEXT;
+
+CREATE INDEX IF NOT EXISTS chunk_claims_company_metric
+    ON chunk_claims (company, metric);
+
+-- Extend the content_type CHECK constraint to include chart_context.
+-- Drop-and-recreate is idempotent: the IF NOT EXISTS on the table above means
+-- new deployments get the constraint inline; existing deployments get it here.
+DO $$
+BEGIN
+    ALTER TABLE chunks
+        DROP CONSTRAINT IF EXISTS chunks_content_type_check;
+    ALTER TABLE chunks
+        ADD CONSTRAINT chunks_content_type_check
+        CHECK (content_type IN (
+            'text', 'table', 'chart_caption',
+            'chart_description', 'chart_context', 'mixed'
+        ));
+EXCEPTION
+    WHEN others THEN
+        NULL;  -- tolerate if constraint name differs across environments
+END;
+$$;
 """
 
 
