@@ -40,11 +40,10 @@ def rrf_fuse(
         descending, with ``bm25_rank``, ``vector_rank``, and ``fused_score``
         fields populated.
     """
-    # Map chunk UUID → RetrievedChunk being built up.
     fused: dict[UUID, RetrievedChunk] = {}
 
     for rank_0, rc in enumerate(bm25_results):
-        rank = rank_0 + 1  # 1-indexed
+        rank = rank_0 + 1
         chunk_id = rc.chunk.id
         score_contribution = 1.0 / (k + rank)
 
@@ -64,7 +63,7 @@ def rrf_fuse(
             existing.fused_score = (existing.fused_score or 0.0) + score_contribution
 
     for rank_0, rc in enumerate(vector_results):
-        rank = rank_0 + 1  # 1-indexed
+        rank = rank_0 + 1
         chunk_id = rc.chunk.id
         score_contribution = 1.0 / (k + rank)
 

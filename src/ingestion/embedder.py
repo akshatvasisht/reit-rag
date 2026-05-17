@@ -4,8 +4,7 @@ No API key. The model is downloaded from Hugging Face on first use and cached
 in ~/.cache/huggingface/. Loads lazily so importing this module is cheap.
 
 Qwen3-Embedding follows the asymmetric retrieval convention:
-  - Queries are encoded with `prompt_name="query"` (adds the task-specific
-    instruction prefix the model was trained with).
+  - Queries are encoded with an explicit domain instruction prefix.
   - Documents are encoded plain.
 """
 
@@ -21,6 +20,12 @@ from sentence_transformers import SentenceTransformer
 from src.models import Chunk
 
 logger = logging.getLogger(__name__)
+
+FINANCIAL_QUERY_INSTRUCTION = (
+    "Given a question from an institutional real estate investment analyst "
+    "about REIT investor presentations, retrieve the most relevant financial "
+    "data, metrics, analysis, and figures that directly answer the question."
+)
 
 EMBED_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 # Pinned commit SHA — supply-chain mitigation against an upstream model swap.
@@ -146,8 +151,9 @@ def embed_chunks(chunks: list[Chunk], batch_size: int = EMBED_BATCH) -> list[Chu
 def embed_query(text: str) -> list[float]:
     """Embed a single query for retrieval.
 
-    Uses Qwen3's `prompt_name="query"` so the encoded vector is in the same
-    space as documents but with the retrieval-task instruction prefix.
+    Prepends a domain-specific instruction so the encoded vector is in the
+    asymmetric retrieval space Qwen3-Embedding expects: queries carry an
+    instruction prefix, documents are encoded plain.
 
     Args:
         text: Natural-language user query.
@@ -156,9 +162,9 @@ def embed_query(text: str) -> list[float]:
         1024-element float list (normalized).
     """
     model = _get_model()
+    instructed_query = f"Instruct: {FINANCIAL_QUERY_INSTRUCTION}\nQuery: {text}"
     vec = model.encode(
-        text,
-        prompt_name="query",
+        instructed_query,
         convert_to_numpy=True,
         normalize_embeddings=True,
     )
