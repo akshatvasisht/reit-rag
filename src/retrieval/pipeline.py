@@ -410,12 +410,16 @@ def _apply_post_rerank_pipeline(
         retained_and_conflict_ids = {rc.chunk.id for rc in expanded}
         sibling_part = [rc for rc in with_siblings if rc.chunk.id not in retained_and_conflict_ids]
         non_sibling_part = [rc for rc in with_siblings if rc.chunk.id in retained_and_conflict_ids]
-        max_siblings = max_chunks - len(non_sibling_part)
-        sibling_trimmed = sibling_part[:max(0, max_siblings)]
-        with_siblings = non_sibling_part + sibling_trimmed
+        if len(non_sibling_part) >= max_chunks:
+            with_siblings = non_sibling_part[:max_chunks]
+            sibling_trimmed: list[RetrievedChunk] = []
+        else:
+            max_siblings = max_chunks - len(non_sibling_part)
+            sibling_trimmed = sibling_part[:max(0, max_siblings)]
+            with_siblings = non_sibling_part + sibling_trimmed
         logger.info(
-            "  [post-rerank] sibling cap: %d core + %d siblings = %d",
-            len(non_sibling_part), len(sibling_trimmed), len(with_siblings),
+            "  [post-rerank] sibling cap: %d core + %d siblings = %d (cap=%d)",
+            len(non_sibling_part), len(sibling_trimmed), len(with_siblings), max_chunks,
         )
 
     logger.info("  [post-rerank] after sibling expansion: %d", len(with_siblings))
@@ -513,6 +517,12 @@ def _retrieve_core(
         max_chunks=MAX_CONTEXT_CHUNKS,
         abstain=abstain,
     )
+    # Deterministic document-coordinate sort so callers see stable ordering
+    # regardless of rerank/conflict/sibling append order.
+    final_contexts = sorted(
+        final_contexts,
+        key=lambda rc: (rc.chunk.company, rc.chunk.report_date, rc.chunk.page_number or 0),
+    )
 
     abstain_reason = (
         f"top reranker score {top_rerank_score:.3f} below threshold {rerank_threshold}"
@@ -585,7 +595,12 @@ def retrieve(
     # top-K that might be dominated by one company's peer-comparison tables.
     if intent == "all_company_synthesis":
         with connect() as conn:
-            synthesis_result = retrieve_all_company_synthesis(query, conn)
+            synthesis_result = retrieve_all_company_synthesis(
+                query,
+                conn,
+                rerank_top_n=rerank_top_n,
+                rerank_threshold=rerank_threshold,
+            )
             if synthesis_result.abstain:
                 return synthesis_result
             final, sub_queries = adaptive_retrieve(query, synthesis_result, conn)

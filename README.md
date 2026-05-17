@@ -102,8 +102,7 @@ python scripts/enrich_charts.py
 # for cost and ordering):
 python scripts/reclassify_subtypes.py        # populate doc_subtype
 python scripts/reclassify_page_content.py    # populate page_content_class
-python scripts/contextualize.py --batch      # Batches API: contextualized text
-python scripts/contextualize.py --embed      # Qwen3 re-embed; activation gate
+python scripts/contextualize.py              # Batches API: contextualize + Qwen3 re-embed; activation gate
 python scripts/extract_claims.py             # populate chunk_claims (M4 verification pass)
 
 streamlit run app.py

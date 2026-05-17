@@ -252,7 +252,7 @@ def test_retrieve_routing_synthesis_calls_synthesis_function(monkeypatch) -> Non
     """When intent is all_company_synthesis, retrieve() must call the synthesis function."""
     called_with: list[str] = []
 
-    def mock_synthesis(query, conn):
+    def mock_synthesis(query, conn, **_kwargs):
         called_with.append(query)
         return RetrievalResult(
             query=query,
@@ -280,7 +280,7 @@ def test_retrieve_routing_non_synthesis_skips_synthesis_function(monkeypatch) ->
     """When intent is latest, retrieve_all_company_synthesis must not be called."""
     synthesis_called: list[bool] = []
 
-    def mock_synthesis(query, conn):
+    def mock_synthesis(query, conn, **_kwargs):
         synthesis_called.append(True)
         return RetrievalResult(
             query=query, intent="all_company_synthesis",

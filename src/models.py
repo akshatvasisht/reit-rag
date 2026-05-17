@@ -30,7 +30,7 @@ class Claim:
     citation: str          # Full citation string: "Company, Doc Type, Month Year, p.N"
     citation_company: str  # Parsed company name from citation
     citation_date: str     # Parsed date from citation e.g. "March 2026"
-    citation_page: int     # Parsed page number from citation
+    citation_page: int | None  # Parsed page number from citation; None when the cited chunk lacks a page
 
 
 @dataclass

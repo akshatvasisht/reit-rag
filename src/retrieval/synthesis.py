@@ -91,7 +91,13 @@ def _retrieve_single_company(
     )
 
 
-def retrieve_all_company_synthesis(query: str, conn) -> "RetrievalResult":
+def retrieve_all_company_synthesis(
+    query: str,
+    conn,
+    *,
+    rerank_top_n: int | None = None,
+    rerank_threshold: float | None = None,
+) -> "RetrievalResult":
     """Run per-company sub-retrieval and merge results for synthesis queries.
 
     Fires one focused retrieval pass per corpus company so every company gets
@@ -119,12 +125,17 @@ def retrieve_all_company_synthesis(query: str, conn) -> "RetrievalResult":
         _apply_post_rerank_pipeline,
     )
 
+    per_company_top_k = rerank_top_n if rerank_top_n is not None else 3
+    threshold = rerank_threshold if rerank_threshold is not None else RERANK_THRESHOLD
+
     corpus_companies = sorted({e["company"] for e in CORPUS_REGISTRY})
     all_chunks: list[RetrievedChunk] = []
     per_company_diagnostics: dict[str, dict] = {}
 
     for company in corpus_companies:
-        company_result = _retrieve_single_company(query, company, conn, top_k=3)
+        company_result = _retrieve_single_company(
+            query, company, conn, top_k=per_company_top_k
+        )
         per_company_diagnostics[company] = {
             "top_rerank": company_result.diagnostics.get("top_rerank"),
             "chunks_found": len(company_result.contexts),
@@ -141,7 +152,7 @@ def retrieve_all_company_synthesis(query: str, conn) -> "RetrievalResult":
             deduped.append(rc)
 
     any_above_threshold = any(
-        d["top_rerank"] is not None and d["top_rerank"] > RERANK_THRESHOLD
+        d["top_rerank"] is not None and d["top_rerank"] >= threshold
         for d in per_company_diagnostics.values()
         if d["chunks_found"] > 0
     )

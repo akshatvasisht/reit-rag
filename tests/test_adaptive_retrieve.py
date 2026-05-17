@@ -336,7 +336,7 @@ def test_retrieve_all_company_synthesis_routes_through_synthesis_then_adaptive(
         diagnostics={"top_rerank_score": 2.0},
     )
 
-    def _mock_synthesis(query, conn):
+    def _mock_synthesis(query, conn, **_kwargs):
         synthesis_called.append(True)
         return synthesis_result
 

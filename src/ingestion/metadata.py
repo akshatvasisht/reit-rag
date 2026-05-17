@@ -78,8 +78,8 @@ def extract_document_meta(pdf_path: str | PurePath) -> DocumentMeta:
     if not candidates:
         raise ValueError(
             f"No corpus registry entry matches filename stem '{stem}'. "
-            f"Add an entry to CORPUS_REGISTRY in src/ingestion/metadata.py "
-            f"or rename the file to include a recognisable keyword "
+            f"Update CORPUS_REGISTRY in src.corpus_registry or rename the file "
+            f"to include a recognisable keyword "
             f"(e.g. 'dlr', 'bxp', 'psa', 'vici', 'egp', 'simon')."
         )
 

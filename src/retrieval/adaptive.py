@@ -199,11 +199,34 @@ def adaptive_retrieve(
             break
 
         try:
-            sub_query: str = tool_block.input["query"]
-            company_filter: list[str] = tool_block.input.get("company_filter") or []
+            sub_query_raw = tool_block.input["query"]
+            company_filter_raw = tool_block.input.get("company_filter")
         except (KeyError, TypeError, AttributeError) as exc:
             logger.warning("Adaptive orchestrator: malformed tool input: %s", exc)
             _log_hop({"hop": hop + 1, "query": query, "error": f"malformed_tool: {exc}"})
+            break
+
+        if not isinstance(sub_query_raw, str) or not sub_query_raw.strip():
+            logger.warning("Adaptive orchestrator: invalid sub_query type/empty: %r", sub_query_raw)
+            _log_hop({"hop": hop + 1, "query": query, "error": "malformed_tool: bad sub_query"})
+            break
+        sub_query: str = sub_query_raw
+
+        if company_filter_raw is None:
+            company_filter: list[str] = []
+        elif isinstance(company_filter_raw, str):
+            company_filter = [company_filter_raw]
+        elif isinstance(company_filter_raw, (list, tuple)) and all(
+            isinstance(c, str) for c in company_filter_raw
+        ):
+            company_filter = list(company_filter_raw)
+        else:
+            logger.warning(
+                "Adaptive orchestrator: invalid company_filter: %r", company_filter_raw
+            )
+            _log_hop(
+                {"hop": hop + 1, "query": query, "error": "malformed_tool: bad company_filter"}
+            )
             break
 
         sub_queries.append(sub_query)

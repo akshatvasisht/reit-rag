@@ -196,7 +196,7 @@ def _chunk_key(rc: RetrievedChunk) -> tuple[str, str, int | None]:
     )
 
 
-def _claim_lookup_key(claim: Claim) -> tuple[str, str, int]:
+def _claim_lookup_key(claim: Claim) -> tuple[str, str, int | None]:
     """Canonical (company, date, page) key derived from claim citation fields."""
     return (
         claim.citation_company.strip().lower(),

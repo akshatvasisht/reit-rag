@@ -49,8 +49,8 @@ ANSWER_JSON_SCHEMA: dict = {
                         "description": "Date parsed from the citation string, e.g. 'March 2026'."
                     },
                     "citation_page": {
-                        "type": "integer",
-                        "description": "Page number parsed from the citation string."
+                        "type": ["integer", "null"],
+                        "description": "Page number parsed from the citation string. Null when the cited chunk lacks a page (rendered as 'p.?' in the excerpt header)."
                     },
                 }
             }

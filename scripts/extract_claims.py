@@ -40,6 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger("extract_claims")
 
 POLL_INTERVAL_SECONDS = 30
+MAX_POLL_SECONDS = 60 * 60 * 6  # 6h ceiling — Batch API SLA tops out at 24h but stalls beyond 6h indicate a real failure
 
 # Greedy decoding for reproducibility.
 CLAIMS_MODEL = "claude-haiku-4-5-20251001"
@@ -134,7 +135,7 @@ def _load_unprocessed_chunks(conn, force: bool, limit: int | None) -> list[dict]
     """Return chunks that do not yet have claim rows, unless --force."""
     sql = """
         SELECT c.id, c.company, c.doc_version, c.page_number,
-               c.chunk_text
+               c.chunk_text, c.content_type
         FROM chunks c
         WHERE c.is_parent = FALSE
     """
@@ -171,15 +172,27 @@ def _build_batch_request(chunk: dict) -> dict[str, Any]:
 
 
 def _poll_until_complete(client, batch_id: str) -> Any:
-    """Block until the batch reaches processing_status == 'ended'."""
+    """Block until the batch reaches processing_status == 'ended'.
+
+    Raises TimeoutError when total polling exceeds MAX_POLL_SECONDS so a
+    permanently-stuck batch cannot deadlock the extractor.
+    """
+    deadline = time.monotonic() + MAX_POLL_SECONDS
+    last_status: str | None = None
     while True:
         batch = client.messages.batches.retrieve(batch_id)
         status = batch.processing_status
+        last_status = status
         logger.info("Batch %s status: %s", batch_id, status)
         if status == "ended":
             return batch
         if status in ("canceling", "canceled", "errored"):
             raise RuntimeError(f"Batch {batch_id} ended in status: {status}")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Batch {batch_id} did not complete within {MAX_POLL_SECONDS}s "
+                f"(last status: {last_status})"
+            )
         time.sleep(POLL_INTERVAL_SECONDS)
 
 

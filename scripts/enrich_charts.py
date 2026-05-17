@@ -73,7 +73,10 @@ def _list_documents(force: bool, doc_id: Optional[str]) -> list[dict]:
                d.chart_enrichment_completed_at,
                (SELECT count(*) FROM chunks c
                   WHERE c.document_id = d.id
-                    AND c.content_type = 'chart_description') AS existing
+                    AND c.content_type = 'chart_description') AS existing,
+               (SELECT count(*) FROM chunks c
+                  WHERE c.document_id = d.id
+                    AND c.content_type = 'chart_context') AS chart_context
         FROM documents d
     """
     params: tuple = ()
@@ -252,13 +255,14 @@ def enrich_document(doc_row: dict, force: bool) -> int:
     source_path = doc_row["source_path"]
     company = doc_row["company"]
     existing = doc_row["existing"]
+    chart_context = doc_row.get("chart_context", 0)
     completed_at = doc_row.get("chart_enrichment_completed_at")
 
     if completed_at and not force:
         logger.info("SKIP (already enriched: %d charts): %s", existing, source_path)
         return 0
 
-    if existing and force:
+    if (existing or chart_context) and force:
         _clear_enrichment_marker(UUID(str(doc_id)))
         n = _delete_chart_chunks(doc_id)
         logger.info("Force re-enrich: deleted %d prior chart chunks for %s", n, company)

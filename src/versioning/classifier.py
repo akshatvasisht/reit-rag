@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from anthropic import Anthropic
-from anthropic.types import TextBlock
 
 logger = logging.getLogger(__name__)
 
@@ -197,16 +196,17 @@ def _latest_period_overrides() -> tuple[str, ...]:
 
 
 def _derive_max_corpus_year() -> str:
-    """Largest 4-digit year present anywhere in the corpus's date strings."""
+    """Largest 4-digit year present anywhere in the corpus's date strings.
+
+    Computed fresh on every call so that runtime corpus refresh (via
+    ``CorpusRegistry.refresh``) immediately propagates without a module reload.
+    """
     years = {
         p[:4]
         for p in _latest_period_overrides()
         if len(p) >= 4 and p[:4].isdigit()
     }
     return max(years) if years else "0000"
-
-
-_CORPUS_MAX_YEAR = _derive_max_corpus_year()
 
 # ---------------------------------------------------------------------------
 # Anthropic client — lazy singleton
@@ -302,7 +302,7 @@ def _regex_classify_intent(query: str) -> TemporalIntent:
         # A bare 4-digit year strictly later than any corpus date is a
         # forward-looking projection (e.g. "outlook for 2030"), not a
         # backward-looking query. Treat as latest.
-        if matched.isdigit() and len(matched) == 4 and matched > _CORPUS_MAX_YEAR:
+        if matched.isdigit() and len(matched) == 4 and matched > _derive_max_corpus_year():
             return "latest"
         return "historical"
 
@@ -313,28 +313,40 @@ def _regex_classify_intent(query: str) -> TemporalIntent:
 # LLM classifier
 # ---------------------------------------------------------------------------
 
-def _llm_classify_intent(query: str) -> dict:
-    """Call Claude Haiku with a JSON-schema-constrained output to classify intent.
+_CLASSIFY_INTENT_TOOL = {
+    "name": "classify_intent",
+    "description": "Return the temporal intent classification for the query.",
+    "input_schema": INTENT_SCHEMA,
+}
 
-    Returns a dict with ``intent`` (str) and ``confidence`` (float).
-    Raises on any API error so the caller can fall back to regex.
+
+def _llm_classify_intent(query: str) -> dict:
+    """Call Claude Haiku with INTENT_SCHEMA enforced via tool-use.
+
+    Forcing ``tool_choice`` on a schema-bound tool guarantees the response is
+    a validated dict (no free-form JSON parsing). Raises on any API error or
+    if the model fails to return a tool_use block, so the caller falls back to
+    regex.
     """
-    response = _anthropic_client().messages.create(
+    response = _anthropic_client().messages.create(  # type: ignore[call-overload]
         model="claude-haiku-4-5-20251001",
-        max_tokens=100,
+        max_tokens=200,
         temperature=0.0,
         top_k=1,
+        tools=[_CLASSIFY_INTENT_TOOL],
+        tool_choice={"type": "tool", "name": "classify_intent"},
         messages=[{
             "role": "user",
             "content": INTENT_CLASSIFICATION_PROMPT.format(query=query),
         }],
     )
-    text = "".join(
-        block.text
-        for block in response.content
-        if isinstance(block, TextBlock)
-    ).strip()
-    return json.loads(text)
+    for block in response.content:
+        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "classify_intent":
+            payload = block.input
+            if not isinstance(payload, dict) or "intent" not in payload or "confidence" not in payload:
+                raise RuntimeError("classify_intent tool returned invalid payload")
+            return payload
+    raise RuntimeError("classify_intent did not return a tool_use block")
 
 
 # ---------------------------------------------------------------------------
