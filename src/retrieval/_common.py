@@ -43,5 +43,7 @@ def _row_to_chunk(row: Sequence[Any], columns: list[str]) -> Chunk:
         chunk_text=r["chunk_text"],
         is_parent=r["is_parent"],
         token_count=r.get("token_count"),
+        doc_subtype=r.get("doc_subtype", "unknown") or "unknown",
+        page_content_class=r.get("page_content_class", "unknown") or "unknown",
         embedding=None,  # never returned from retrieval queries for efficiency
     )

@@ -21,23 +21,33 @@ from src.retrieval._common import _row_to_chunk
 
 logger = logging.getLogger(__name__)
 
+# ef_search controls how many candidates the HNSW graph explores at query time.
+# pgvector defaults to 40; raising it to 200 matches ef_construction and improves
+# recall at the cost of a small latency increase — acceptable for batch RAG queries.
+HNSW_EF_SEARCH = 200
+
 # Columns to SELECT — excludes chunk_text_tsv and embedding to keep rows lean.
 _SELECT_COLS = """
     id, document_id, parent_chunk_id,
     company, ticker, doc_type, report_date, period_covered, doc_version,
     section_title, page_number, content_type, source_authority,
-    chunk_text, is_parent, token_count
+    chunk_text, is_parent, token_count,
+    doc_subtype, page_content_class
 """.strip()
 
 # Cast to ::halfvec explicitly because the column type is halfvec(1024), not
 # vector. psycopg passes list[float] as a plain array; the cast tells pgvector
 # which type adapter to use so the <=> cosine-distance operator resolves to
 # halfvec_cosine_ops (matched by the HNSW index).
+# COALESCE falls back to the base embedding when contextualized_embedding is
+# NULL, so chunks not yet processed by scripts/contextualize.py continue to
+# work correctly.  No boilerplate filter here — vector distance handles those
+# pages via embedding similarity and false-positive filtering would hurt recall.
 _VECTOR_SQL = f"""
 SELECT {_SELECT_COLS}
 FROM chunks
 WHERE is_parent = FALSE
-ORDER BY embedding <=> %s::halfvec
+ORDER BY COALESCE(contextualized_embedding, embedding) <=> %s::halfvec
 LIMIT %s;
 """
 
@@ -48,7 +58,7 @@ SELECT {_SELECT_COLS}
 FROM chunks
 WHERE is_parent = FALSE
   AND company = ANY(%s)
-ORDER BY embedding <=> %s::halfvec
+ORDER BY COALESCE(contextualized_embedding, embedding) <=> %s::halfvec
 LIMIT %s;
 """
 
@@ -57,7 +67,7 @@ SELECT {_SELECT_COLS}
 FROM chunks
 WHERE is_parent = FALSE
   AND content_type = ANY(%s)
-ORDER BY embedding <=> %s::halfvec
+ORDER BY COALESCE(contextualized_embedding, embedding) <=> %s::halfvec
 LIMIT %s;
 """
 
@@ -67,7 +77,7 @@ FROM chunks
 WHERE is_parent = FALSE
   AND company = ANY(%s)
   AND content_type = ANY(%s)
-ORDER BY embedding <=> %s::halfvec
+ORDER BY COALESCE(contextualized_embedding, embedding) <=> %s::halfvec
 LIMIT %s;
 """
 
@@ -108,6 +118,7 @@ def vector_search(
 
     def _run(connection: psycopg.Connection) -> list[RetrievedChunk]:
         with connection.cursor() as cur:
+            cur.execute(f"SET hnsw.ef_search = {HNSW_EF_SEARCH}")
             if companies and content_types:
                 cur.execute(_VECTOR_SQL_FILTERED_CT, (companies, content_types, embedding, limit))
             elif companies:

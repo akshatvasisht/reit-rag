@@ -22,14 +22,28 @@ _SELECT_COLS = """
     id, document_id, parent_chunk_id,
     company, ticker, doc_type, report_date, period_covered, doc_version,
     section_title, page_number, content_type, source_authority,
-    chunk_text, is_parent, token_count
+    chunk_text, is_parent, token_count,
+    doc_subtype, page_content_class
 """.strip()
+
+# Exclude known-boilerplate classes from BM25 so legal disclaimers and index
+# entries do not pollute keyword recall.  ``unknown`` and ``substantive`` chunks
+# are always included; only confidently-classified non-content pages are dropped.
+# This filter is intentionally absent from vector_search (dense retrieval handles
+# such pages better via embedding distance, and false-positive filtering at that
+# stage would hurt recall more than it helps precision).
+_BOILERPLATE_FILTER = (
+    "AND (page_content_class IS NULL"
+    " OR page_content_class NOT IN ('boilerplate_legal', 'index_reference'))"
+)
 
 # Use plainto_tsquery for English-aware tokenization/stemming/stop-word removal,
 # then rewrite '&' (AND) → '|' (OR) so multi-term natural-language queries
-# do not require every token to appear in a chunk. ts_rank still rewards chunks
+# do not require every token to appear in a chunk. ts_rank_cd rewards chunks
 # matching MORE terms, so loose recall + reranker precision is preserved (the
 # standard 2-stage retrieval pattern; cross-encoder downstream cleans up).
+# COALESCE falls back to chunk_text_tsv when contextualized_text_tsv is NULL,
+# ensuring chunks that have not yet been contextualized still rank correctly.
 _BM25_SQL = f"""
 WITH q AS (
     SELECT replace(plainto_tsquery('english', %s)::text, ' & ', ' | ')::tsquery
@@ -38,8 +52,9 @@ WITH q AS (
 SELECT {_SELECT_COLS}
 FROM chunks, q
 WHERE is_parent = FALSE
-  AND chunk_text_tsv @@ tsq
-ORDER BY ts_rank(chunk_text_tsv, tsq) DESC
+  AND COALESCE(contextualized_text_tsv, chunk_text_tsv) @@ tsq
+  {_BOILERPLATE_FILTER}
+ORDER BY ts_rank_cd(COALESCE(contextualized_text_tsv, chunk_text_tsv), tsq) DESC
 LIMIT %s;
 """
 
@@ -53,9 +68,10 @@ WITH q AS (
 SELECT {_SELECT_COLS}
 FROM chunks, q
 WHERE is_parent = FALSE
-  AND chunk_text_tsv @@ tsq
+  AND COALESCE(contextualized_text_tsv, chunk_text_tsv) @@ tsq
   AND company = ANY(%s)
-ORDER BY ts_rank(chunk_text_tsv, tsq) DESC
+  {_BOILERPLATE_FILTER}
+ORDER BY ts_rank_cd(COALESCE(contextualized_text_tsv, chunk_text_tsv), tsq) DESC
 LIMIT %s;
 """
 
@@ -67,9 +83,10 @@ WITH q AS (
 SELECT {_SELECT_COLS}
 FROM chunks, q
 WHERE is_parent = FALSE
-  AND chunk_text_tsv @@ tsq
+  AND COALESCE(contextualized_text_tsv, chunk_text_tsv) @@ tsq
   AND content_type = ANY(%s)
-ORDER BY ts_rank(chunk_text_tsv, tsq) DESC
+  {_BOILERPLATE_FILTER}
+ORDER BY ts_rank_cd(COALESCE(contextualized_text_tsv, chunk_text_tsv), tsq) DESC
 LIMIT %s;
 """
 
@@ -81,10 +98,11 @@ WITH q AS (
 SELECT {_SELECT_COLS}
 FROM chunks, q
 WHERE is_parent = FALSE
-  AND chunk_text_tsv @@ tsq
+  AND COALESCE(contextualized_text_tsv, chunk_text_tsv) @@ tsq
   AND company = ANY(%s)
   AND content_type = ANY(%s)
-ORDER BY ts_rank(chunk_text_tsv, tsq) DESC
+  {_BOILERPLATE_FILTER}
+ORDER BY ts_rank_cd(COALESCE(contextualized_text_tsv, chunk_text_tsv), tsq) DESC
 LIMIT %s;
 """
 
