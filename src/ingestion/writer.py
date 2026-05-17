@@ -31,15 +31,16 @@ def write_document(conn: Connection, doc_meta: DocumentMeta) -> UUID:
             """
             INSERT INTO documents
                 (id, company, ticker, doc_type, report_date, period_covered,
-                 doc_version, source_path)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                 doc_version, source_path, doc_subtype)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (source_path) DO UPDATE
               SET company = EXCLUDED.company,
                   ticker = EXCLUDED.ticker,
                   doc_type = EXCLUDED.doc_type,
                   report_date = EXCLUDED.report_date,
                   period_covered = EXCLUDED.period_covered,
-                  doc_version = EXCLUDED.doc_version
+                  doc_version = EXCLUDED.doc_version,
+                  doc_subtype = EXCLUDED.doc_subtype
             RETURNING id;
             """,
             (
@@ -51,6 +52,7 @@ def write_document(conn: Connection, doc_meta: DocumentMeta) -> UUID:
                 doc_meta.period_covered,
                 doc_meta.doc_version,
                 doc_meta.source_path,
+                doc_meta.doc_subtype,
             ),
         )
         row = cur.fetchone()
@@ -100,6 +102,8 @@ def write_chunks(conn: Connection, chunks: list[Chunk], batch_size: int = 100) -
                         embedding,
                         c.is_parent,
                         c.token_count,
+                        c.doc_subtype,
+                        c.page_content_class,
                     )
                 )
             cur.executemany(
@@ -109,8 +113,8 @@ def write_chunks(conn: Connection, chunks: list[Chunk], batch_size: int = 100) -
                      doc_type, report_date, period_covered, doc_version,
                      section_title, page_number, content_type,
                      source_authority, chunk_text, embedding, is_parent,
-                     token_count)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     token_count, doc_subtype, page_content_class)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 params,
             )

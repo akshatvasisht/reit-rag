@@ -8,6 +8,7 @@ This module owns:
   - the Anthropic vision API call
   - PIL image → base64 conversion
   - the NOT_CHART sentinel parsing
+  - extraction confidence filtering and fallback chunk text assembly
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import logging
 import os
 import re
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 from PIL import Image
 from anthropic import Anthropic
@@ -32,6 +33,12 @@ VISION_MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 600  # extraction output is short; cap to control cost
 MIN_IMAGE_DIM = 100  # below this on either axis → assume logo / icon, skip
 
+# Confidence thresholds for chart extraction quality filtering.
+# Descriptions below these bars are treated as low-confidence and replaced
+# with a chart_context fallback that preserves page context without noise.
+MIN_DESCRIPTION_LENGTH = 150
+MIN_NUMERICAL_VALUES = 1
+
 # Sentinel the prompt instructs the model to emit for non-chart images.
 NOT_CHART_SENTINEL = "NOT_CHART"
 _NOT_CHART_RE = re.compile(r"\bNOT_CHART\b", re.IGNORECASE)
@@ -41,6 +48,52 @@ _NOT_CHART_RE = re.compile(r"\bNOT_CHART\b", re.IGNORECASE)
 # loss during intermittent failures.
 MAX_RETRIES = 3
 INITIAL_BACKOFF_SECONDS = 2.0
+
+# Footer appended to every chart_context fallback chunk so retrievers know to
+# consult the source document for the actual chart data.
+_CHART_CONTEXT_FOOTER = (
+    "Chart detected on this page — visual extraction did not meet confidence threshold. "
+    "Consult source document for chart data."
+)
+
+
+def _is_confident_extraction(description: str) -> bool:
+    """Return True when the vision extraction meets minimum quality standards.
+
+    A description is accepted only when it is long enough, contains at least
+    one numerical value, and uses the expected structural keywords that the
+    extraction prompt requests.  Short or keyword-free outputs indicate the
+    model could not read the chart reliably.
+    """
+    if len(description) < MIN_DESCRIPTION_LENGTH:
+        return False
+    if description.strip().upper() == "NOT_CHART":
+        return False
+    has_number = bool(re.search(r'\d+(?:\.\d+)?', description))
+    if not has_number:
+        return False
+    has_structure = any(kw in description.lower() for kw in
+                        ["chart type", "title", "key values", "axes", "trend"])
+    return has_structure
+
+
+def build_chart_context_text(
+    section_title: Optional[str],
+    sibling_texts: list[str],
+) -> str:
+    """Assemble the chunk_text for a chart_context fallback chunk.
+
+    The fallback preserves as much page context as possible (section heading +
+    sibling text-chunk content) so the page is still retrievable even though
+    the chart image could not be reliably described.
+    """
+    parts: list[str] = []
+    if section_title:
+        parts.append(section_title)
+    if sibling_texts:
+        parts.append("\n".join(t for t in sibling_texts if t))
+    parts.append(_CHART_CONTEXT_FOOTER)
+    return "\n\n".join(p for p in parts if p)
 
 
 def _parse_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
@@ -104,21 +157,27 @@ def _image_to_base64_png(image: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def extract_chart(image: Image.Image) -> Optional[str]:
+def extract_chart(image: Image.Image) -> Tuple[Optional[str], bool]:
     """Call Claude vision to extract a structured chart description.
 
     Args:
         image: PIL Image of a single PictureItem from Docling.
 
     Returns:
-        - The structured description string if the model identified a chart.
-        - None if the image is below the size threshold or the model returned
-          the NOT_CHART sentinel.
+        A tuple ``(description, needs_fallback)`` where:
+        - ``description`` is the structured text when the model found a chart
+          that passes the confidence gate, or None otherwise.
+        - ``needs_fallback`` is True when the model produced output that looks
+          like a chart but did not meet the confidence gate — the caller should
+          create a chart_context fallback chunk in that case.
+
+        When ``description`` is None and ``needs_fallback`` is False, the image
+        was filtered by size, identified as NOT_CHART, or returned empty output.
     """
     width, height = image.size
     if width < MIN_IMAGE_DIM or height < MIN_IMAGE_DIM:
         logger.debug("Skipping small image (%dx%d) — likely a logo/icon", width, height)
-        return None
+        return None, False
 
     b64 = _image_to_base64_png(image)
     client = _get_client()
@@ -129,10 +188,21 @@ def extract_chart(image: Image.Image) -> Optional[str]:
     ).strip()
 
     if not text:
-        return None
+        return None, False
     if _NOT_CHART_RE.search(text):
-        return None
-    return text
+        return None, False
+
+    # Apply the confidence gate.  A passing description is stored as
+    # chart_description.  A failing one signals the caller to create a
+    # chart_context fallback so the page remains findable without noise.
+    if not _is_confident_extraction(text):
+        logger.debug(
+            "Extraction failed confidence gate (%d chars) — fallback chunk needed",
+            len(text),
+        )
+        return None, True
+
+    return text, False
 
 
 def _call_with_retry(client: Anthropic, b64_image: str):
