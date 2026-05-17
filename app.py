@@ -10,9 +10,10 @@ import logging
 
 import streamlit as st
 
-from src.generation.generator import answer_stream
+from src.generation.generator import answer_structured
 from src.generation.prompts import format_citation_header
 from src.models import RetrievedChunk
+from src.retrieval.pipeline import confidence_band
 from src.retrieval.reranker import RERANK_THRESHOLD
 
 
@@ -23,22 +24,25 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # Confidence indicator thresholds.
 # ---------------------------------------------------------------------------
 
-# Heuristic thresholds for ms-marco cross-encoder logit scores:
-#   ≥ HIGH      → green  ("Confident — direct evidence retrieved")
-#   ≥ THRESHOLD → amber  ("Some evidence; verify before relying on figures")
-#   < THRESHOLD → red    ("Abstained — no reliable evidence")
+# Legacy threshold kept for any callers that compare raw logit scores.
 CONFIDENCE_HIGH = 3.0
 CONFIDENCE_LOW = RERANK_THRESHOLD
 
 
-def _confidence_label(top_score: float, abstained: bool) -> str:
-    """Return plain-text confidence label for summary metrics."""
+def _confidence_label(retrieval_confidence: float, abstained: bool) -> str:
+    """Return plain-text confidence label for summary metrics.
+
+    Translates a [0, 1] composite evidence-quality score into a display band.
+    The binary abstain gate is unchanged — this function is only called after
+    the abstain check passes.
+    """
     if abstained:
         return "Abstained"
-    if top_score >= CONFIDENCE_HIGH:
-        return "Confident"
-    if top_score >= CONFIDENCE_LOW:
-        return "Partial evidence"
+    band = confidence_band(retrieval_confidence)
+    if band == "high":
+        return "High confidence"
+    if band == "medium":
+        return "Medium confidence"
     return "Low confidence"
 
 
@@ -142,9 +146,9 @@ query = st.text_input(
 submitted_query = st.session_state.get("submitted_query", "")
 if submitted_query:
     # ------------------------------------------------------------------
-    # Run the query. Stream tokens into a placeholder and, on completion,
-    # persist the final answer in st.session_state so subsequent reruns
-    # (for example, when opening a source expander) retain the output.
+    # Run the query and persist the final answer in st.session_state so
+    # subsequent reruns (for example, when opening a source expander)
+    # retain the output.
     # ------------------------------------------------------------------
     answer_placeholder = st.empty()
     status_placeholder = st.empty()
@@ -152,29 +156,14 @@ if submitted_query:
     with status_placeholder.status("Retrieving and generating…", expanded=False) as status:
         st.write("Classifying query and searching the corpus…")
 
-        final_answer = None
-        text_chunks: list[str] = []
-        abstain_text: str | None = None
+        # Streaming removed: structured output guarantees schema-compliant typed responses, which is the correct tradeoff for a financial citation system.
+        final_answer = answer_structured(submitted_query)
 
-        for event in answer_stream(submitted_query):
-            kind = event["event"]
-            if kind == "retrieval":
-                result = event["result"]
-            elif kind == "abstain":
-                abstain_text = event["text"]
-                answer_placeholder.warning(abstain_text)
-            elif kind == "delta":
-                text_chunks.append(event["text"])
-                answer_placeholder.markdown("".join(text_chunks))
-            elif kind == "final":
-                final_answer = event["answer"]
         status.update(label="Done", state="complete", expanded=False)
 
-    if final_answer is not None:
-        st.session_state["last_answer"] = final_answer
+    st.session_state["last_answer"] = final_answer
 
-    # Clear streaming placeholders — render below from session_state in a
-    # uniform layout that survives expander-click reruns.
+    # Clear the placeholder — the persistent block below renders the answer.
     answer_placeholder.empty()
     st.session_state["submitted_query"] = ""
 
@@ -194,16 +183,36 @@ if final_answer is not None:
         else:
             st.markdown(final_answer.text)
 
+        # Citation badges from the answer's claim objects
+        if not final_answer.abstained and hasattr(final_answer, "citation_report"):
+            report = final_answer.citation_report
+        else:
+            report = None
+
         # Summary metrics (single place for diagnostics)
-        top_score = final_answer.diagnostics.get("top_rerank_score", float("-inf"))
-        report = final_answer.citation_report
+        retrieval_conf = final_answer.diagnostics.get("retrieval_confidence", 0.0)
         summary_left, summary_mid, summary_right, summary_last = st.columns(4)
         summary_left.metric("Intent", str(final_answer.intent))
         summary_mid.metric(
             "Contexts",
             str(final_answer.diagnostics.get("after_expansion", 0)),
         )
-        summary_right.metric("Confidence", _confidence_label(top_score, final_answer.abstained))
+        summary_right.metric("Confidence", _confidence_label(retrieval_conf, final_answer.abstained))
+
+        # Confidence band caveats — shown inline below the metrics row.
+        if not final_answer.abstained:
+            _band = confidence_band(retrieval_conf)
+            if _band == "medium":
+                st.caption(
+                    "Retrieved evidence is moderate — verify against source documents "
+                    "for critical decisions."
+                )
+            elif _band == "low":
+                st.warning(
+                    "Retrieved evidence is weak — treat this answer as a starting "
+                    "point for manual review, not a verified fact."
+                )
+
         if report is not None and report.total > 0:
             summary_last.metric(
                 "Citations",
@@ -212,6 +221,62 @@ if final_answer is not None:
             )
         else:
             summary_last.metric("Citations", "n/a")
+
+        # Retrieval hops badge — shown when adaptive multi-hop ran.
+        retrieval_hops = final_answer.diagnostics.get("retrieval_hops", 0)
+        if retrieval_hops and retrieval_hops > 0:
+            sub_queries = final_answer.diagnostics.get("sub_queries", [])
+            st.info(f"Retrieval hops: {retrieval_hops}")
+            if sub_queries:
+                with st.expander("Sub-queries fired during adaptive retrieval"):
+                    for i, sq in enumerate(sub_queries, start=1):
+                        st.caption(f"{i}. {sq}")
+
+        # Out-of-corpus attribution badge — shown when an answer attributes a
+        # value to an entity not in the indexed corpus. More severe than the
+        # numeric mismatch badge; rendered in its own row above it.
+        ooc_issues = getattr(final_answer, "ooc_attribution_issues", [])
+        if ooc_issues:
+            st.error("⚠ Out-of-corpus attribution")
+            with st.expander("Out-of-corpus attribution details"):
+                st.caption(
+                    "The following claims attribute specific figures to companies "
+                    "that are not in the indexed document corpus. Treat these "
+                    "figures with extreme caution."
+                )
+                for issue in ooc_issues:
+                    ooc_entity = issue.get("ooc_entity", "unknown entity")
+                    citing_company = issue.get("citing_company", "unknown source")
+                    st.markdown(
+                        f"This answer attributes a specific figure to **{ooc_entity}**, "
+                        f"which is not in the indexed corpus. The figure was found in "
+                        f"**{citing_company}**'s document as an incidental mention. "
+                        f"Treat this figure with extreme caution."
+                    )
+                    st.divider()
+
+        # Value mismatch badge — shown only when numeric issues were detected.
+        if report is not None and report.numeric_mismatches:
+            st.error("⚠ Value mismatch detected")
+            with st.expander("Value mismatch details"):
+                st.caption(
+                    "The following claimed values could not be verified in their cited source chunks."
+                )
+                for issue in report.numeric_mismatches:
+                    if issue.get("type") == "numeric_mismatch":
+                        st.markdown(
+                            f"**Claim:** {issue['claim']}  \n"
+                            f"**Claimed value:** `{issue['claimed_value']}`  \n"
+                            f"**Values found in source:** "
+                            f"{', '.join(f'`{v}`' for v in issue['chunk_values_found']) or '(none)'}"
+                        )
+                    elif issue.get("type") == "unsupported_citation":
+                        st.markdown(
+                            f"**Claim:** {issue['claim']}  \n"
+                            f"**Claimed value:** `{issue['value']}`  \n"
+                            "**Source:** cited chunk not found in retrieved context"
+                        )
+                    st.divider()
 
         st.caption("Source excerpts")
         _render_sources(final_answer.contexts)

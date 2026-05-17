@@ -43,9 +43,6 @@ class _FailingMessages:
     def create(self, **kwargs):  # noqa: ANN003
         raise APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
 
-    def stream(self, **kwargs):  # noqa: ANN003
-        raise APIConnectionError(request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
-
 
 class _FailingClient:
     def __init__(self) -> None:
@@ -62,13 +59,11 @@ def test_answer_returns_controlled_error_on_generation_failure(monkeypatch) -> N
     assert result.diagnostics.get("generation_error") == "APIConnectionError"
 
 
-def test_answer_stream_emits_abstain_and_final_on_generation_failure(monkeypatch) -> None:
+def test_answer_structured_returns_controlled_error_on_generation_failure(monkeypatch) -> None:
     monkeypatch.setattr(generator, "retrieve", lambda query: _mk_retrieval())
     monkeypatch.setattr(generator, "_get_client", lambda: _FailingClient())
 
-    events = list(generator.answer_stream("What is DLR leverage?"))
-    assert events[0]["event"] == "retrieval"
-    assert events[1]["event"] == "abstain"
-    assert "temporary model/API issue" in events[1]["text"]
-    assert events[2]["event"] == "final"
-    assert events[2]["answer"].abstained is True
+    result = generator.answer_structured("What is DLR leverage?")
+    assert result.abstained is True
+    assert "temporary model/API issue" in result.text
+    assert result.diagnostics.get("generation_error") == "APIConnectionError"
