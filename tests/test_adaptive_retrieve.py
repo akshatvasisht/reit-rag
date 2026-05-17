@@ -13,13 +13,12 @@ from uuid import uuid4
 import pytest
 
 from src.models import Chunk, RetrievedChunk, StructuredAnswer, Claim
-from src.retrieval.pipeline import (
+from src.retrieval.adaptive import (
     ADAPTIVE_INTENTS,
     MAX_ADAPTIVE_HOPS,
-    RetrievalResult,
     adaptive_retrieve,
-    retrieve,
 )
+from src.retrieval.pipeline import RetrievalResult, retrieve
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +117,7 @@ def test_adaptive_retrieve_end_turn_no_hop() -> None:
     conn = MagicMock()
     mock_client = _make_mock_client([_make_end_turn_response()])
 
-    with patch("src.retrieval.pipeline._get_haiku_client", return_value=mock_client):
+    with patch("src.retrieval.adaptive._get_haiku_client", return_value=mock_client):
         result, sub_queries = adaptive_retrieve(
             "How does DLR leverage compare to its target?",
             initial,
@@ -162,7 +161,7 @@ def test_adaptive_retrieve_one_hop_merges_new_contexts() -> None:
     ]
     mock_client = _make_mock_client(responses)
 
-    with patch("src.retrieval.pipeline._get_haiku_client", return_value=mock_client):
+    with patch("src.retrieval.adaptive._get_haiku_client", return_value=mock_client):
         with patch("src.retrieval.pipeline._retrieve_core", return_value=hop_result):
             result, sub_queries = adaptive_retrieve(
                 "How does DLR leverage compare to its target?",
@@ -203,7 +202,7 @@ def test_adaptive_retrieve_caps_at_max_hops() -> None:
         diagnostics={},
     )
 
-    with patch("src.retrieval.pipeline._get_haiku_client", return_value=mock_client):
+    with patch("src.retrieval.adaptive._get_haiku_client", return_value=mock_client):
         with patch("src.retrieval.pipeline._retrieve_core", return_value=hop_result):
             result, sub_queries = adaptive_retrieve(
                 "How does DLR leverage compare to its target?",
@@ -229,7 +228,7 @@ def test_adaptive_retrieve_exception_returns_original_contexts() -> None:
     failing_client = MagicMock()
     failing_client.messages.create.side_effect = RuntimeError("network failure")
 
-    with patch("src.retrieval.pipeline._get_haiku_client", return_value=failing_client):
+    with patch("src.retrieval.adaptive._get_haiku_client", return_value=failing_client):
         result, sub_queries = adaptive_retrieve(
             "How does DLR leverage compare to its target?",
             initial,
@@ -247,7 +246,7 @@ def test_adaptive_retrieve_client_init_exception_returns_original() -> None:
     conn = MagicMock()
 
     with patch(
-        "src.retrieval.pipeline._get_haiku_client",
+        "src.retrieval.adaptive._get_haiku_client",
         side_effect=RuntimeError("no API key"),
     ):
         result, sub_queries = adaptive_retrieve(
@@ -457,7 +456,7 @@ def test_adaptive_retrieve_applies_d1_sort() -> None:
     ]
     mock_client = _make_mock_client(responses)
 
-    with patch("src.retrieval.pipeline._get_haiku_client", return_value=mock_client):
+    with patch("src.retrieval.adaptive._get_haiku_client", return_value=mock_client):
         with patch("src.retrieval.pipeline._retrieve_core", return_value=hop_result):
             result, _ = adaptive_retrieve("original query", initial, conn)
 

@@ -173,7 +173,7 @@ def _latest_period_overrides() -> tuple[str, ...]:
     Cost is O(n) over the registry, which is small (one entry per document
     class) and dwarfed by the regex match itself.
     """
-    from src.corpus.registry import CORPUS_REGISTRY  # local to avoid cycles
+    from src.corpus_registry import CORPUS_REGISTRY  # local to avoid cycles
 
     out: set[str] = set()
     for entry in CORPUS_REGISTRY:

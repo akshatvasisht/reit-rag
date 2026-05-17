@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Corpus registry — re-exported for backward compatibility.
-# The authoritative list lives in src.corpus.registry; the seed bootstrap is
-# in src.ingestion._registry_seed.
+# The authoritative list lives in src.corpus_registry; the seed bootstrap is
+# in src.corpus_registry.
 # ---------------------------------------------------------------------------
-from src.corpus.registry import CORPUS_REGISTRY  # noqa: E402
+from src.corpus_registry import CORPUS_REGISTRY  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

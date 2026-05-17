@@ -16,8 +16,7 @@ import psycopg
 
 from src.db import connect
 from src.ingestion.embedder import embed_query
-from src.models import RetrievedChunk
-from src.retrieval._common import _row_to_chunk
+from src.models import Chunk, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +133,7 @@ def vector_search(
 
         results: list[RetrievedChunk] = []
         for rank, row in enumerate(rows, start=1):
-            chunk = _row_to_chunk(row, columns)
+            chunk = Chunk.from_row(row, columns)
             results.append(RetrievedChunk(chunk=chunk, vector_rank=rank))
 
         logger.debug("Vector search returned %d chunks", len(results))

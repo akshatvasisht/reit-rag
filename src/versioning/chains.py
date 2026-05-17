@@ -164,8 +164,6 @@ def expand_to_parents(
     parent_ids = list(needs_expansion.keys())
 
     def _fetch(connection) -> dict[UUID, Chunk]:
-        from src.retrieval._common import _row_to_chunk
-
         placeholders = ", ".join(["%s"] * len(parent_ids))
         sql = f"""
             SELECT id, document_id, parent_chunk_id, company, ticker,
@@ -179,7 +177,7 @@ def expand_to_parents(
         with connection.cursor() as cur:
             cur.execute(sql, [str(pid) for pid in parent_ids])
             cols = [d.name for d in cur.description]
-            return {chunk.id: chunk for chunk in (_row_to_chunk(row, cols) for row in cur.fetchall())}
+            return {chunk.id: chunk for chunk in (Chunk.from_row(row, cols) for row in cur.fetchall())}
 
     if conn is not None:
         parent_map = _fetch(conn)

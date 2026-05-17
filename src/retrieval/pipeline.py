@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import warnings
 from dataclasses import dataclass, field
@@ -16,13 +15,21 @@ from pathlib import Path
 from uuid import UUID
 
 from src.db import connect
-from src.corpus.registry import CORPUS_REGISTRY
+from src.corpus_registry import CORPUS_REGISTRY
 from src.models import Chunk, RetrievedChunk
-from src.retrieval._common import _row_to_chunk
+from src.retrieval.adaptive import ADAPTIVE_INTENTS, adaptive_retrieve
 from src.retrieval.bm25 import bm25_search
+from src.retrieval.confidence import (
+    CONFIDENCE_HIGH_CUTOFF,
+    CONFIDENCE_LOW_CUTOFF,
+    _score_magnitude_signal,
+    compute_retrieval_confidence,
+    confidence_band,
+)
 from src.retrieval.entity_filter import extract_companies
 from src.retrieval.fusion import rrf_fuse
 from src.retrieval.reranker import RERANK_THRESHOLD, rerank
+from src.retrieval.synthesis import retrieve_all_company_synthesis
 from src.retrieval.vector import vector_search
 from src.versioning.chains import dedupe_by_version_group, expand_to_parents
 from src.versioning.classifier import TemporalIntent, classify_intent
@@ -116,110 +123,6 @@ SIBLING_BORDERLINE_WIDTH = 3.0
 
 
 # ---------------------------------------------------------------------------
-# Calibrated confidence scoring — composite of gap, magnitude, and coverage.
-#
-# The three weights and the two band cutoffs below are uncalibrated initial
-# values chosen to produce intuitive ordering (higher score = stronger
-# evidence).  They should be re-drawn at the medians of correct / borderline /
-# refused queries once a sufficient evaluation set has been evaluated.
-# ---------------------------------------------------------------------------
-
-CONFIDENCE_HIGH_CUTOFF = 0.75   # uncalibrated; pending measurement on evaluation set
-CONFIDENCE_LOW_CUTOFF  = 0.45   # uncalibrated; pending measurement on evaluation set
-W_GAP, W_MAGNITUDE, W_COVERAGE = 0.50, 0.30, 0.20
-
-
-def _score_gap_signal(scores: list[float]) -> float:
-    """Score the separation between the top-1 and top-2 reranker scores.
-
-    A large positive gap means the best chunk is clearly better than the
-    runner-up — a reliable indicator of a clean retrieval hit.  Negative gaps
-    (top-2 outscores top-1 after sorting) are clamped to 0.
-    """
-    if len(scores) < 2:
-        return 0.0
-    top, second = scores[0], scores[1]
-    denom = abs(top) if abs(top) > 1e-6 else 1.0
-    gap = (top - second) / denom
-    return max(0.0, min(1.0, gap))
-
-
-def _score_magnitude_signal(top_score: float) -> float:
-    """Map a cross-encoder logit to [0, 1] via a sigmoid.
-
-    The ms-marco cross-encoder's answered-band logits skew negative
-    (threshold is -5.0).  The sigmoid is centred at -2.0 with scale 2.0 so
-    that top_score=-5 maps to ~0.18, top_score=-2 to 0.50, and
-    top_score=+2 to ~0.88.
-    """
-    return 1.0 / (1.0 + math.exp(-(top_score + 2.0) / 2.0))
-
-
-def _coverage_signal(contexts: list["RetrievedChunk"], company_filter: list[str] | None) -> float:
-    """Fraction of returned chunks that belong to an expected company.
-
-    When no entity filter is active the query is corpus-wide and any returned
-    chunk is on-target, so coverage is 1.0.  With a filter, partial coverage
-    suggests the retrieval engine had to pull from off-target companies.
-    """
-    if not contexts:
-        return 0.0
-    if not company_filter:
-        return 1.0
-    expected = {c.lower() for c in company_filter}
-    matches = sum(
-        1 for rc in contexts
-        if rc.chunk.company and rc.chunk.company.lower() in expected
-    )
-    return matches / len(contexts)
-
-
-def compute_retrieval_confidence(
-    contexts: list["RetrievedChunk"],
-    company_filter: list[str] | None,
-) -> float:
-    """Return a composite evidence-quality score in [0, 1].
-
-    Combines three signals — score gap, score magnitude, entity coverage —
-    using fixed weights (see module-level constants).  Computed on the
-    post-rerank, pre-augmentation chunk list so conflict and sibling chunks
-    (added at synthetic scores) do not skew the result.
-    """
-    if not contexts:
-        return 0.0
-    scores = [rc.rerank_score for rc in contexts if rc.rerank_score is not None]
-    if not scores:
-        return 0.0
-    gap = _score_gap_signal(scores)
-    mag = _score_magnitude_signal(scores[0])
-    cov = _coverage_signal(contexts, company_filter)
-    composite = W_GAP * gap + W_MAGNITUDE * mag + W_COVERAGE * cov
-    return max(0.0, min(1.0, composite))
-
-
-def confidence_band(score: float) -> str:
-    """Map a [0, 1] confidence score to a human-readable band label."""
-    if score >= CONFIDENCE_HIGH_CUTOFF:
-        return "high"
-    if score >= CONFIDENCE_LOW_CUTOFF:
-        return "medium"
-    return "low"
-
-# Intents that may benefit from follow-up retrieval passes when initial evidence
-# is judged insufficient.  "latest" is excluded because single-company snapshot
-# queries do not require cross-document chaining.
-ADAPTIVE_INTENTS: frozenset[str] = frozenset(
-    {"historical", "comparison", "conflict", "all_company_synthesis"}
-)
-
-# Maximum number of additional retrieval passes beyond the initial one.
-MAX_ADAPTIVE_HOPS = 2
-
-# Path for hop-orchestration audit records.
-_HOP_LOG_PATH = Path("logs/adaptive_hops.jsonl")
-
-
-# ---------------------------------------------------------------------------
 # Conflict-chunk columns — must match the SELECT shape used by bm25/vector.
 # ---------------------------------------------------------------------------
 
@@ -248,7 +151,7 @@ def _fetch_chunks_by_ids(conn, ids: list[UUID]) -> list[RetrievedChunk]:
             return []
         cols = [d.name for d in cur.description]
         rows = cur.fetchall()
-    return [RetrievedChunk(chunk=_row_to_chunk(row, cols)) for row in rows]
+    return [RetrievedChunk(chunk=Chunk.from_row(row, cols)) for row in rows]
 
 
 def _fetch_chunk_by_doc_page(conn, document_id, page_number: int) -> RetrievedChunk | None:
@@ -277,7 +180,7 @@ def _fetch_chunk_by_doc_page(conn, document_id, page_number: int) -> RetrievedCh
         return None
     # rerank_score is left as None: sibling chunks are added purely for
     # coverage and were not scored by the cross-encoder.
-    return RetrievedChunk(chunk=_row_to_chunk(row, cols))
+    return RetrievedChunk(chunk=Chunk.from_row(row, cols))
 
 
 def expand_to_siblings(
@@ -517,166 +420,6 @@ def _apply_post_rerank_pipeline(
 
     logger.info("  [post-rerank] after sibling expansion: %d", len(with_siblings))
     return with_siblings
-
-
-def _retrieve_single_company(
-    query: str,
-    company: str,
-    conn,
-    top_k: int = 3,
-) -> "RetrievalResult":
-    """Run a focused retrieval pass restricted to a single company.
-
-    Reuses the existing BM25 + vector + RRF + rerank infrastructure with a
-    company filter so each corpus company gets equal representation in the
-    synthesis context regardless of which company's peer-comparison tables
-    happen to score highest in a global pass.
-
-    Args:
-        query: The user's natural language query string.
-        company: Canonical company name to restrict retrieval to.
-        conn: Open psycopg connection shared from the caller.
-        top_k: Maximum reranked chunks to keep per company.
-
-    Returns:
-        A RetrievalResult for this company; abstain reflects whether the
-        company's best chunk cleared the rerank threshold.
-    """
-    companies = [company]
-    bm25_results = bm25_search(
-        query, limit=CANDIDATES_PER_RETRIEVER, conn=conn, companies=companies
-    )
-    vector_results = vector_search(
-        query, limit=CANDIDATES_PER_RETRIEVER, conn=conn, companies=companies
-    )
-    fused = rrf_fuse(bm25_results, vector_results, k=RRF_K, top_n=FUSED_TOP_N)
-    reranked = rerank(query, fused, top_n=top_k)
-
-    top_rerank_score: float = (
-        reranked[0].rerank_score
-        if reranked and reranked[0].rerank_score is not None
-        else float("-inf")
-    )
-    abstain = top_rerank_score < RERANK_THRESHOLD
-
-    return RetrievalResult(
-        query=query,
-        intent="all_company_synthesis",
-        contexts=reranked,
-        companies=companies,
-        abstain=abstain,
-        abstain_reason=(
-            f"top reranker score {top_rerank_score:.3f} below threshold {RERANK_THRESHOLD}"
-            if abstain else None
-        ),
-        diagnostics={
-            "top_rerank": top_rerank_score,
-        },
-    )
-
-
-def retrieve_all_company_synthesis(query: str, conn) -> "RetrievalResult":
-    """Run per-company sub-retrieval and merge results for synthesis queries.
-
-    Fires one focused retrieval pass per corpus company so every company gets
-    equal representation — a global top-K pass would over-represent companies
-    whose peer-comparison tables happen to score highest and leave others with
-    zero coverage.
-
-    The merged chunk list is deduplicated by chunk PK (a chunk incidentally
-    mentioning two companies appears only once).  The context cap for synthesis
-    is ``len(corpus_companies) * 3`` rather than MAX_CONTEXT_CHUNKS because the
-    synthesis path intentionally trades a wider context window for cross-company
-    coverage.
-
-    Args:
-        query: The user's natural language query string.
-        conn: Open psycopg connection.
-
-    Returns:
-        A RetrievalResult with all per-company chunks merged and deduplicated.
-        abstain=True only when no company returned a chunk above the threshold.
-    """
-    corpus_companies = sorted({e["company"] for e in CORPUS_REGISTRY})
-    all_chunks: list[RetrievedChunk] = []
-    per_company_diagnostics: dict[str, dict] = {}
-
-    for company in corpus_companies:
-        company_result = _retrieve_single_company(query, company, conn, top_k=3)
-        per_company_diagnostics[company] = {
-            "top_rerank": company_result.diagnostics.get("top_rerank"),
-            "chunks_found": len(company_result.contexts),
-        }
-        all_chunks.extend(company_result.contexts)
-
-    # Deduplicate by chunk PK: a chunk mentioning multiple companies in a peer
-    # table would otherwise appear once per company sub-query.
-    seen: set = set()
-    deduped: list[RetrievedChunk] = []
-    for rc in all_chunks:
-        if rc.chunk.id not in seen:
-            seen.add(rc.chunk.id)
-            deduped.append(rc)
-
-    any_above_threshold = any(
-        d["top_rerank"] is not None and d["top_rerank"] > RERANK_THRESHOLD
-        for d in per_company_diagnostics.values()
-        if d["chunks_found"] > 0
-    )
-
-    # For the synthesis path the cross-company score gap is not meaningful
-    # (each company was retrieved independently), so confidence is the mean
-    # of per-company magnitude signals for companies that produced scored chunks.
-    per_company_top_scores = [
-        d["top_rerank"]
-        for d in per_company_diagnostics.values()
-        if d["top_rerank"] is not None and d["chunks_found"] > 0
-    ]
-    if per_company_top_scores and any_above_threshold:
-        synthesis_confidence = max(
-            0.0,
-            min(
-                1.0,
-                sum(_score_magnitude_signal(s) for s in per_company_top_scores)
-                / len(per_company_top_scores),
-            ),
-        )
-    else:
-        synthesis_confidence = 0.0
-
-    # Apply the full post-rerank pipeline to the cross-company merged set.
-    # dedupe_by_version_group is a no-op for "all_company_synthesis" (pass-through),
-    # but conflict injection, parent expansion, and sibling expansion all run here
-    # for the first time on the synthesis path.
-    cap = MAX_SYNTHESIS_CONTEXT_CHUNKS or len(corpus_companies) * 3
-    final_contexts = _apply_post_rerank_pipeline(
-        deduped,
-        intent="all_company_synthesis",
-        conn=conn,
-        company_filter=None,
-        max_chunks=cap,
-        abstain=not any_above_threshold,
-    )
-
-    return RetrievalResult(
-        query=query,
-        intent="all_company_synthesis",
-        contexts=final_contexts,
-        companies=corpus_companies,
-        abstain=not any_above_threshold,
-        abstain_reason=(
-            "no company returned evidence above the rerank threshold"
-            if not any_above_threshold else None
-        ),
-        retrieval_confidence=synthesis_confidence,
-        diagnostics={
-            "intent": "all_company_synthesis",
-            "per_company": per_company_diagnostics,
-            "total_chunks": len(final_contexts),
-        },
-    )
-
-
 @dataclass
 class RetrievalResult:
     """Output bundle from `retrieve()` — contexts plus diagnostics for the UI."""
@@ -795,223 +538,6 @@ def _retrieve_core(
         },
     )
 
-
-# ---------------------------------------------------------------------------
-# Adaptive multi-hop orchestration
-# ---------------------------------------------------------------------------
-
-# Haiku model used for sufficiency evaluation — lightweight and fast.
-_HAIKU_MODEL = "claude-haiku-4-5-20251001"
-
-# Tool schema presented to Haiku when it evaluates evidence sufficiency.
-_RETRIEVE_MORE_TOOL = {
-    "name": "retrieve_more",
-    "description": (
-        "Request an additional retrieval pass when the existing evidence "
-        "demonstrably cannot answer the query. Only call this tool when a "
-        "specific, identifiable fact is missing — not when the answer could "
-        "theoretically be improved."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Sub-question that targets the missing evidence.",
-            },
-            "company_filter": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "Restrict the sub-retrieval to these company names. "
-                    "Pass an empty list for no restriction."
-                ),
-            },
-        },
-        "required": ["query", "company_filter"],
-        "additionalProperties": False,
-    },
-}
-
-_SUFFICIENCY_SYSTEM = (
-    "You are a retrieval orchestrator for a financial document Q&A system. "
-    "Your only job is to decide whether the current evidence is sufficient to "
-    "answer the user's query, and if not, to call the retrieve_more tool with "
-    "a focused sub-question that targets the specific missing fact.\n\n"
-    "Rules:\n"
-    "- Call retrieve_more ONLY when a specific, identifiable fact is absent "
-    "from the evidence summary and that fact is necessary to answer the query.\n"
-    "- Do NOT call retrieve_more when the evidence could theoretically be "
-    "improved but already contains enough material to produce a reasonable answer.\n"
-    "- Do NOT call retrieve_more if the query is unanswerable regardless of "
-    "additional retrieval (e.g. the fact does not exist in financial documents).\n"
-    "- If evidence is sufficient, respond with end_turn — do not explain yourself.\n"
-    "- Sub-questions must be concise and specific (under 30 words)."
-)
-
-
-def _build_evidence_summary(contexts: list[RetrievedChunk]) -> str:
-    """Produce a compact evidence summary for the Haiku sufficiency evaluator.
-
-    Uses metadata and a short text hint rather than the full chunk text to
-    keep the Haiku prompt small and cheap.
-    """
-    if not contexts:
-        return "(no evidence retrieved yet)"
-    lines: list[str] = []
-    for i, rc in enumerate(contexts, start=1):
-        c = rc.chunk
-        hint = (c.chunk_text or "")[:120].replace("\n", " ")
-        score_str = f"{rc.rerank_score:.2f}" if rc.rerank_score is not None else "—"
-        lines.append(
-            f"[{i}] {c.company} | {c.doc_type} | {c.report_date} "
-            f"| p.{c.page_number or '?'} | score={score_str} "
-            f"| section={c.section_title or '—'} | hint: {hint!r}"
-        )
-    return "\n".join(lines)
-
-
-def _log_hop(record: dict) -> None:
-    """Append a JSON record to the hop audit log; swallow all I/O errors."""
-    try:
-        _HOP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _HOP_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _get_haiku_client():  # type: ignore[return]
-    """Return a lazy-initialised Anthropic client for adaptive hop calls."""
-    import os as _os
-
-    from anthropic import Anthropic as _Anthropic
-
-    api_key = _os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
-    return _Anthropic(api_key=api_key)
-
-
-def adaptive_retrieve(
-    query: str,
-    initial_result: "RetrievalResult",
-    conn,
-) -> "tuple[RetrievalResult, list[str]]":
-    """Adaptive multi-hop loop: ask Haiku whether current evidence suffices.
-
-    If Haiku judges the evidence insufficient and proposes a sub-question,
-    runs another retrieval pass using the existing infrastructure with the
-    sub-question and merges contexts by chunk ID dedupe.  Caps at
-    MAX_ADAPTIVE_HOPS additional hops.  On any Haiku API error, returns
-    the initial result unchanged so the user query is never blocked by
-    a failed hop call.
-
-    Args:
-        query: The original user query.
-        initial_result: Output of the first retrieval pass.
-        conn: Open psycopg connection for additional retrieval passes.
-
-    Returns:
-        A tuple of (merged RetrievalResult, list of sub-queries fired).
-    """
-    seen_chunk_ids: set = {rc.chunk.id for rc in initial_result.contexts}
-    merged_contexts: list[RetrievedChunk] = list(initial_result.contexts)
-    sub_queries: list[str] = []
-
-    try:
-        client = _get_haiku_client()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Adaptive orchestrator unavailable: %s", exc)
-        return initial_result, []
-
-    for hop in range(MAX_ADAPTIVE_HOPS):
-        evidence_summary = _build_evidence_summary(merged_contexts)
-        user_message = (
-            f"Original query: {query}\n\n"
-            f"Current evidence ({len(merged_contexts)} chunks):\n{evidence_summary}"
-        )
-
-        try:
-            response = client.messages.create(
-                model=_HAIKU_MODEL,
-                max_tokens=300,
-                temperature=0.0,
-                top_k=1,
-                system=_SUFFICIENCY_SYSTEM,
-                tools=[_RETRIEVE_MORE_TOOL],  # type: ignore[list-item]
-                messages=[{"role": "user", "content": user_message}],
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Adaptive orchestrator call failed on hop %d: %s", hop + 1, exc)
-            _log_hop({"hop": hop + 1, "query": query, "error": str(exc)})
-            break
-
-        if response.stop_reason != "tool_use":
-            logger.info("Adaptive orchestrator: evidence sufficient after %d hop(s)", hop)
-            break
-
-        # Extract the retrieve_more tool call.
-        tool_block = next(
-            (b for b in response.content if getattr(b, "type", None) == "tool_use"),
-            None,
-        )
-        if tool_block is None:
-            break
-
-        try:
-            sub_query: str = tool_block.input["query"]
-            company_filter: list[str] = tool_block.input.get("company_filter") or []
-        except (KeyError, TypeError, AttributeError) as exc:
-            logger.warning("Adaptive orchestrator: malformed tool input: %s", exc)
-            _log_hop({"hop": hop + 1, "query": query, "error": f"malformed_tool: {exc}"})
-            break
-
-        sub_queries.append(sub_query)
-        logger.info(
-            "Adaptive hop %d: sub_query=%r company_filter=%s",
-            hop + 1, sub_query, company_filter,
-        )
-        _log_hop({
-            "hop": hop + 1,
-            "original_query": query,
-            "sub_query": sub_query,
-            "company_filter": company_filter,
-        })
-
-        hop_result = _retrieve_core(
-            sub_query,
-            company_filter=company_filter if company_filter else None,
-            conn=conn,
-            intent=initial_result.intent,
-        )
-
-        # Merge new contexts, deduping by chunk ID.
-        new_count = 0
-        for rc in hop_result.contexts:
-            if rc.chunk.id not in seen_chunk_ids:
-                seen_chunk_ids.add(rc.chunk.id)
-                merged_contexts.append(rc)
-                new_count += 1
-        logger.info("Adaptive hop %d: +%d new chunks merged", hop + 1, new_count)
-
-    # Apply deterministic sort over the merged context list.
-    merged_contexts_sorted = sorted(
-        merged_contexts,
-        key=lambda rc: (rc.chunk.company, rc.chunk.report_date, rc.chunk.page_number or 0),
-    )
-
-    merged_result = RetrievalResult(
-        query=initial_result.query,
-        intent=initial_result.intent,
-        contexts=merged_contexts_sorted,
-        companies=initial_result.companies,
-        abstain=initial_result.abstain,
-        abstain_reason=initial_result.abstain_reason,
-        retrieval_confidence=initial_result.retrieval_confidence,
-        diagnostics=dict(initial_result.diagnostics),
-    )
-    return merged_result, sub_queries
 
 
 # ---------------------------------------------------------------------------

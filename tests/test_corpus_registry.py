@@ -7,14 +7,14 @@ from unittest.mock import patch
 
 import pytest
 
-from src.corpus.registry import (
+from src.corpus_registry import (
     CORPUS_REGISTRY,
     CorpusRegistry,
     _derive_keywords,
     _reset_for_tests,
     get_registry,
 )
-from src.ingestion._registry_seed import CORPUS_REGISTRY_SEED
+from src.corpus_registry import CORPUS_REGISTRY_SEED
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def test_refresh_with_mocked_db_updates_entries() -> None:
 def test_refresh_propagates_to_statically_imported_corpus_registry() -> None:
     """Calling get_registry().refresh() must update the module-level CORPUS_REGISTRY list.
 
-    Consumers that did ``from src.corpus.registry import CORPUS_REGISTRY`` at
+    Consumers that did ``from src.corpus_registry import CORPUS_REGISTRY`` at
     import time hold a reference to the same list object.  After refresh() the
     list contents must reflect the new rows so those consumers see updated data
     without re-importing.
@@ -112,7 +112,7 @@ def test_module_level_list_identity_is_preserved_across_refresh() -> None:
     """The list object returned by ``import CORPUS_REGISTRY`` must be the same
     object before and after a refresh — only the contents change."""
     _reset_for_tests()
-    import src.corpus.registry as reg_module
+    import src.corpus_registry as reg_module
 
     list_id_before = id(reg_module.CORPUS_REGISTRY)
 
@@ -131,7 +131,7 @@ def test_module_level_list_identity_is_preserved_across_refresh() -> None:
 
 def test_reset_for_tests_restores_module_level_list_to_seed() -> None:
     """_reset_for_tests() must restore the module-level CORPUS_REGISTRY to the seed."""
-    import src.corpus.registry as reg_module
+    import src.corpus_registry as reg_module
 
     # Pollute the module-level list.
     reg_module.CORPUS_REGISTRY.clear()
@@ -144,7 +144,7 @@ def test_reset_for_tests_restores_module_level_list_to_seed() -> None:
 
 def test_reset_for_tests_new_singleton_uses_same_module_list() -> None:
     """After _reset_for_tests, the fresh singleton's _entries IS the module list."""
-    import src.corpus.registry as reg_module
+    import src.corpus_registry as reg_module
 
     _reset_for_tests()
     registry = get_registry()
@@ -174,7 +174,7 @@ def test_derive_keywords_digital_realty() -> None:
 
 
 def test_module_level_corpus_registry_is_list() -> None:
-    """CORPUS_REGISTRY exported from src.corpus.registry must be a list."""
+    """CORPUS_REGISTRY exported from src.corpus_registry must be a list."""
     assert isinstance(CORPUS_REGISTRY, list)
 
 

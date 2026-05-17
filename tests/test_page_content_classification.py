@@ -52,7 +52,7 @@ def test_three_boilerplate_signals_no_llm_call() -> None:
         "provisions. This presentation does not constitute an offer to sell securities. "
         "All trademarks are registered trademark of their respective owners."
     )
-    with patch("src.ingestion.chunker._llm_classify_page_content") as mock_llm:
+    with patch("src.ingestion.page_classifier._llm_classify_page_content") as mock_llm:
         result = classify_page_content(text, "Legal Disclaimers")
     # LLM should not have been called at all.
     mock_llm.assert_not_called()
@@ -66,7 +66,7 @@ def test_two_signals_short_chunk_no_llm_call() -> None:
         "provisions of the Securities Act."
     )
     # Under 150 tokens, two signals → boilerplate_legal
-    with patch("src.ingestion.chunker._llm_classify_page_content") as mock_llm:
+    with patch("src.ingestion.page_classifier._llm_classify_page_content") as mock_llm:
         result = classify_page_content(text, "")
     mock_llm.assert_not_called()
     assert result == "boilerplate_legal"
@@ -80,7 +80,7 @@ def test_two_signals_short_chunk_no_llm_call() -> None:
 def test_short_no_digit_chunk_is_index_reference() -> None:
     """A chunk under 25 words with no digits should be index_reference."""
     text = "Overview of Portfolio and Strategy"
-    with patch("src.ingestion.chunker._llm_classify_page_content") as mock_llm:
+    with patch("src.ingestion.page_classifier._llm_classify_page_content") as mock_llm:
         result = classify_page_content(text, "Table of Contents")
     mock_llm.assert_not_called()
     assert result == "index_reference"
@@ -91,7 +91,7 @@ def test_short_chunk_with_digits_reaches_llm() -> None:
     text = "NOI grew to $1.4B"  # < 25 words but has digits
     mock_resp = _mock_llm_response("substantive", 0.95)
 
-    with patch("src.ingestion.chunker._get_page_content_client") as mock_client_getter:
+    with patch("src.ingestion.page_classifier._get_page_content_client") as mock_client_getter:
         mock_client = MagicMock()
         mock_client.messages.create.return_value = mock_resp
         mock_client_getter.return_value = mock_client
@@ -114,7 +114,7 @@ def test_llm_high_confidence_substantive_returned() -> None:
         "in hyperscale and enterprise segments."
     )
 
-    with patch("src.ingestion.chunker._get_page_content_client") as mock_client_getter:
+    with patch("src.ingestion.page_classifier._get_page_content_client") as mock_client_getter:
         mock_client = MagicMock()
         mock_client.messages.create.return_value = mock_resp
         mock_client_getter.return_value = mock_client
@@ -128,7 +128,7 @@ def test_llm_high_confidence_cover_page_returned() -> None:
     mock_resp = _mock_llm_response("cover_page", 0.88)
     text = "Digital Realty Trust — Q4 2025 Investor Presentation  |  March 2026"
 
-    with patch("src.ingestion.chunker._get_page_content_client") as mock_client_getter:
+    with patch("src.ingestion.page_classifier._get_page_content_client") as mock_client_getter:
         mock_client = MagicMock()
         mock_client.messages.create.return_value = mock_resp
         mock_client_getter.return_value = mock_client
@@ -150,7 +150,7 @@ def test_llm_exception_returns_unknown() -> None:
         "and improving net operating income metrics across the portfolio."
     )
 
-    with patch("src.ingestion.chunker._get_page_content_client") as mock_client_getter:
+    with patch("src.ingestion.page_classifier._get_page_content_client") as mock_client_getter:
         mock_client = MagicMock()
         mock_client.messages.create.side_effect = RuntimeError("API unavailable")
         mock_client_getter.return_value = mock_client
@@ -167,7 +167,7 @@ def test_llm_client_none_returns_unknown() -> None:
         "driven by hyperscale leasing activity in Northern Virginia."
     )
 
-    with patch("src.ingestion.chunker._get_page_content_client", return_value=None):
+    with patch("src.ingestion.page_classifier._get_page_content_client", return_value=None):
         result = classify_page_content(text, "Leasing Update")
 
     assert result == "unknown"
@@ -186,7 +186,7 @@ def test_llm_low_confidence_returns_unknown() -> None:
         "earnings release and associated guidance for the upcoming period."
     )
 
-    with patch("src.ingestion.chunker._get_page_content_client") as mock_client_getter:
+    with patch("src.ingestion.page_classifier._get_page_content_client") as mock_client_getter:
         mock_client = MagicMock()
         mock_client.messages.create.return_value = mock_resp
         mock_client_getter.return_value = mock_client
@@ -205,7 +205,7 @@ def test_llm_exactly_at_threshold_returns_class() -> None:
         "regarding securities transactions or investment decisions."
     )
 
-    with patch("src.ingestion.chunker._get_page_content_client") as mock_client_getter:
+    with patch("src.ingestion.page_classifier._get_page_content_client") as mock_client_getter:
         mock_client = MagicMock()
         mock_client.messages.create.return_value = mock_resp
         mock_client_getter.return_value = mock_client

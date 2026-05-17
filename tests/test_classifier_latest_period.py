@@ -22,7 +22,7 @@ def test_latest_period_overrides_reflects_registry_contents() -> None:
     mock_registry = [
         {"report_date": "2026-06", "period_covered": "Q2 2026"},
     ]
-    with patch("src.corpus.registry.CORPUS_REGISTRY", mock_registry):
+    with patch("src.corpus_registry.CORPUS_REGISTRY", mock_registry):
         result = _latest_period_overrides()
 
     assert "2026-06" in result
@@ -36,10 +36,10 @@ def test_latest_period_overrides_no_caching() -> None:
     first_registry = [{"report_date": "2025-03", "period_covered": "Q1 2025"}]
     second_registry = [{"report_date": "2027-09", "period_covered": "Q3 2027"}]
 
-    with patch("src.corpus.registry.CORPUS_REGISTRY", first_registry):
+    with patch("src.corpus_registry.CORPUS_REGISTRY", first_registry):
         first = _latest_period_overrides()
 
-    with patch("src.corpus.registry.CORPUS_REGISTRY", second_registry):
+    with patch("src.corpus_registry.CORPUS_REGISTRY", second_registry):
         second = _latest_period_overrides()
 
     assert "2025-03" in first
@@ -59,7 +59,7 @@ def test_latest_period_overrides_handles_versions_dict() -> None:
             }
         }
     ]
-    with patch("src.corpus.registry.CORPUS_REGISTRY", mock_registry):
+    with patch("src.corpus_registry.CORPUS_REGISTRY", mock_registry):
         result = _latest_period_overrides()
 
     assert "2024-12" in result
@@ -70,7 +70,7 @@ def test_latest_period_overrides_handles_versions_dict() -> None:
 
 def test_latest_period_overrides_empty_registry() -> None:
     """An empty registry must return an empty tuple without raising."""
-    with patch("src.corpus.registry.CORPUS_REGISTRY", []):
+    with patch("src.corpus_registry.CORPUS_REGISTRY", []):
         result = _latest_period_overrides()
     assert result == ()
 
@@ -85,7 +85,7 @@ def test_regex_classify_uses_live_registry_for_latest_detection() -> None:
     should classify as 'latest', not 'historical'."""
     # Inject a registry where 2030-06 is a known latest period.
     mock_registry = [{"report_date": "2030-06", "period_covered": "Q2 2030"}]
-    with patch("src.corpus.registry.CORPUS_REGISTRY", mock_registry):
+    with patch("src.corpus_registry.CORPUS_REGISTRY", mock_registry):
         result = _regex_classify_intent("What is the NOI in June 2030?")
     assert result == "latest"
 
@@ -94,7 +94,7 @@ def test_regex_classify_historical_when_not_in_live_registry() -> None:
     """A query mentioning a date that is NOT in the mocked latest periods should
     classify as 'historical'."""
     mock_registry = [{"report_date": "2030-06", "period_covered": "Q2 2030"}]
-    with patch("src.corpus.registry.CORPUS_REGISTRY", mock_registry):
+    with patch("src.corpus_registry.CORPUS_REGISTRY", mock_registry):
         # 2024-09 is not a latest period in this mock — historical
         result = _regex_classify_intent("What was the leverage in September 2024?")
     assert result == "historical"
