@@ -19,10 +19,11 @@ from pathlib import Path
 # Allow running as a script without -m
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.corpus.registry import get_registry
 from src.db import connect
-from src.ingestion.chunker import chunk_document
+from src.ingestion.chunker import chunk_document, classify_page_content
 from src.ingestion.embedder import embed_chunks
-from src.ingestion.metadata import extract_document_meta
+from src.ingestion.metadata import classify_doc_subtype, extract_document_meta
 from src.ingestion.parser import parse_pdf
 from src.ingestion.writer import (
     delete_chunks_for_document,
@@ -68,6 +69,26 @@ def ingest_one(pdf_path: Path, force: bool = False) -> None:
 
     docling_doc = parse_pdf(pdf_path)
     chunks = chunk_document(docling_doc, doc_meta)
+
+    # Classify the document subtype from the first page of the parsed text.
+    first_page_chunks = [c for c in chunks if c.page_number == 1 and c.is_parent]
+    first_page_text = " ".join(c.chunk_text for c in first_page_chunks[:3])
+    doc_meta.doc_subtype = classify_doc_subtype(
+        first_page_text=first_page_text,
+        filename=pdf_path.name,
+        doc_type=doc_meta.doc_type,
+    )
+    logger.info("  Subtype: %s", doc_meta.doc_subtype)
+
+    # Propagate doc_subtype to every chunk so version-group keying is consistent.
+    # Classify page content for every chunk; boilerplate/index chunks are filtered
+    # from BM25 at retrieval time.  chart_description chunks remain additive and
+    # classification is applied uniformly — the retrieval filter acts on class values.
+    for chunk in chunks:
+        chunk.doc_subtype = doc_meta.doc_subtype
+        chunk.page_content_class = classify_page_content(
+            chunk.chunk_text, chunk.section_title or ""
+        )
     parents = sum(1 for c in chunks if c.is_parent)
     children = len(chunks) - parents
     logger.info("  Chunks: %d parents + %d children", parents, children)
@@ -86,6 +107,8 @@ def ingest_one(pdf_path: Path, force: bool = False) -> None:
         n = write_chunks(conn, chunks)
         conn.commit()
         logger.info("  Wrote %d chunks for %s", n, doc_meta.company)
+
+    get_registry().refresh()
 
 
 def main() -> None:
