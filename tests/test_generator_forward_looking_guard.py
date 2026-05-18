@@ -453,6 +453,57 @@ def test_answer_uses_corpus_aware_prompt_for_generation(monkeypatch) -> None:
             f"Corpus company '{company}' must appear in system prompt used for generation"
 
 
+# ---------------------------------------------------------------------------
+# simon-std-1 — Footnote anchor disambiguation in system prompt
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_contains_footnote_anchor_instruction() -> None:
+    """build_system_prompt_with_corpus() must embed the footnote-anchor disambiguation
+    instruction so the Simon p.4 $478/fn.3 vs ICSC/fn.2 trap is caught at generation
+    time regardless of query intent.
+
+    Anchor probe: simon-std-1 — user asks "what does ICSC say about $478 per sq ft"
+    but the chunk attributes $478 to fn.3 (Simon analysis), not fn.2 (ICSC).
+    The instruction must be present unconditionally (not gated on FL intent).
+    """
+    from src.generation.generator import _build_system_prompt_with_corpus
+
+    prompt = _build_system_prompt_with_corpus(["BXP", "Simon Property Group"])
+
+    assert "footnote" in prompt.lower() or "anchor" in prompt.lower(), (
+        "System prompt must contain footnote-anchor disambiguation instruction "
+        f"(probe: simon-std-1); got first 500 chars: {prompt[:500]}"
+    )
+
+
+def test_system_prompt_contains_citation_page_anchoring_instruction() -> None:
+    """The system prompt must embed an explicit "every cited page must match an
+    actually-retrieved excerpt" rule. The instruction has to be unconditional —
+    the failure mode is fabricated page tuples on all-company synthesis queries
+    where the model has the right value but invents a plausible-looking page
+    number that does not match any retrieved chunk.
+
+    Anchor probe: g07 — "Rank all companies by Net Debt to EBITDA" produced an
+    answer whose citation page tuples did not exist in any retrieved chunk.
+    """
+    from src.generation.generator import _build_system_prompt_with_corpus
+
+    prompt = _build_system_prompt_with_corpus(["BXP", "Digital Realty"])
+
+    lowered = prompt.lower()
+    assert "page" in lowered and "retrieved" in lowered, (
+        "System prompt must reference 'page' and 'retrieved' in the page-anchoring "
+        "rule; got first 800 chars: " + prompt[:800]
+    )
+    # The instruction must specifically forbid inferring a page from where the
+    # data 'should' be — the prior failure mode was the model guessing a page
+    # because the figure was correct.
+    assert "should" in lowered or "infer" in lowered or "invent" in lowered, (
+        "System prompt must forbid inferring page numbers; got: " + prompt[:800]
+    )
+
+
 def test_system_prompt_in_corpus_company_not_found_framing(monkeypatch) -> None:
     """When an in-corpus company is NOT in retrieved contexts, the LLM should use
     'I did not retrieve a chunk from...' framing, NOT 'not in corpus'.

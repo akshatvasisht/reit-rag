@@ -87,6 +87,9 @@ def test_soft_refusal_pass_when_abstained():
     "not provided",
     "do not contain",
     "cannot determine",
+    "not updated",
+    "not reaffirmed",
+    "did not disclose",
 ])
 def test_soft_refusal_pass_on_refusal_language(phrase: str):
     gq = _query_with_soft_refusal()
@@ -99,6 +102,55 @@ def test_soft_refusal_pass_on_refusal_language(phrase: str):
     result = _grade(gq, a)
     assert "soft_refusal" in result.auto_pass_reasons
     assert "expected_soft_refusal_but_answered" not in result.auto_fail_reasons
+
+
+def test_soft_refusal_pass_on_lead_then_adjacent_context():
+    """An answer that LEADS with refusal-shaped language and then provides
+    adjacent context about what IS disclosed is a textbook soft refusal.
+    This is the g23-style case the prior over-strict grader rejected."""
+    gq = _query_with_soft_refusal()
+    long_context = (
+        "For reference, the deck does disclose leverage ratios, debt service "
+        "ratios, fixed-charge ratios, and debt composition as of QE 12/31/25 "
+        "and QE 12/31/23 — but no narrative discussion of credit facility "
+        "amendments, covenant waivers, or compliance certifications."
+    )
+    a = _FakeAnswer(
+        text=(
+            "The retrieved chunks from the Investor Presentation do not "
+            "contain any explicit disclosure of changes to the credit facility "
+            "or debt covenant compliance. " + long_context
+        ),
+        abstained=False,
+        diagnostics={"top_rerank_score": 0.5, "retrieval_confidence": 0.4},
+        contexts=[RetrievedChunk(chunk=_make_chunk(), rerank_score=0.5)],
+    )
+    result = _grade(gq, a)
+    assert "soft_refusal" in result.auto_pass_reasons
+
+
+def test_soft_refusal_fail_when_hedge_buried_at_tail():
+    """An answer that asserts substantive content first and then appends a
+    refusal hedge at the tail should NOT pass — the prior over-permissive
+    grader let these through. The positional first-400-chars check rejects."""
+    gq = _query_with_soft_refusal()
+    substantive_lead = (
+        "DLR has a $4.2B revolving credit facility with a $2.0B accordion "
+        "feature and an unused capacity of $1.8B as of Q4 2025. The facility "
+        "matures in 2028 and carries an investment-grade-only covenant "
+        "package including a maximum leverage ratio of 60% and a minimum "
+        "fixed-charge coverage ratio of 1.5x. Recent amendments include an "
+        "extension of the accordion feature and a reduction in the unused "
+        "fee. "
+    )
+    a = _FakeAnswer(
+        text=substantive_lead + "The credit facility amendments are not disclosed in fine detail.",
+        abstained=False,
+        diagnostics={"top_rerank_score": 0.9, "retrieval_confidence": 0.8},
+        contexts=[RetrievedChunk(chunk=_make_chunk(), rerank_score=0.9)],
+    )
+    result = _grade(gq, a)
+    assert "expected_soft_refusal_but_answered" in result.auto_fail_reasons
 
 
 # ---------------------------------------------------------------------------

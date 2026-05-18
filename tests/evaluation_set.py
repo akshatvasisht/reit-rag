@@ -333,7 +333,6 @@ EVALUATION_SET: list[EvaluationQuery] = [
         category="metric_precision",
         expected_intent="historical",
         expected_company="BXP",
-        expect_soft_refusal=True,
         human_eval_rubric=(
             "BXP Morning Session p.18 reports the Q2 2020 -> Q2 2025 "
             "occupancy trend (CBD 95.2% -> 89.9%, Δ-5.3pp; Suburban "
@@ -341,16 +340,17 @@ EVALUATION_SET: list[EvaluationQuery] = [
             "snapshot and the projected YE 2026 occupancy (89.0%). A "
             "correct answer reports the disclosed endpoint trend and "
             "names the granularity available (period-endpoint comparison "
-            "rather than a quarterly series). A soft-refusal that frames "
-            "the granularity limit is also acceptable."
+            "rather than a quarterly series)."
         ),
         notes=(
-            "Calibration: prior version expected hard_abstain because the "
-            "deck lacks a strictly consecutive-quarter series, but the "
-            "five-year endpoint comparison with a projected end-point IS "
-            "a disclosed trend. Verified against BXP Morning Session p.18 "
-            "and p.79. expect_soft_refusal accepts either a substantive "
-            "answer or a granularity-framed refusal."
+            "Calibration: a previous version expected hard_abstain on the "
+            "rationale that the deck lacks a strictly consecutive-quarter "
+            "series. The five-year endpoint comparison plus a projected "
+            "end-point IS a disclosed trend, and the strict soft-refusal "
+            "grader would reject the substantive answer that this query "
+            "should produce. No expect_* flag is set; auto-grading passes "
+            "via intent, company, and citation faithfulness signals. "
+            "Verified against BXP Morning Session p.18 and p.79."
         ),
     ),
     EvaluationQuery(

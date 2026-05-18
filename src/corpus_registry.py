@@ -204,7 +204,9 @@ class CorpusRegistry:
             new_entries = self._load_from_db()
         except Exception as exc:
             logger.warning(
-                "corpus_registry DB refresh failed (%s: %s); using seed list",
+                "corpus_registry DB refresh failed (%s: %s); keeping current "
+                "in-memory entries (seed list on first call, last successful "
+                "refresh thereafter)",
                 type(exc).__name__,
                 exc,
             )

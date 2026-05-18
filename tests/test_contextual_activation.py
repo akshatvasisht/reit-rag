@@ -175,19 +175,28 @@ class TestCheckContextualActivationAtStartup:
         assert "COALESCE" in formatted
 
     def test_db_exception_logged_no_crash(self):
-        """DB raises → caught, logged at WARNING, no crash."""
+        """DB raises → caught, logged at WARNING, no crash. Both the exception
+        class name AND the specific message must appear in the formatted log
+        record so operators can diagnose the failure from logs alone."""
         fn = self._get_fn()
 
+        exc_message = "no db: connection refused at 127.0.0.1:5433"
         with patch("src.retrieval.pipeline.logger") as mock_logger, \
-             patch("src.db.connect", side_effect=RuntimeError("no db")):
+             patch("src.db.connect", side_effect=RuntimeError(exc_message)):
             fn()  # must not raise
 
-        # Failure is now observable: a warning with the exception class and
-        # message is emitted so operators see when the startup check fails.
         mock_logger.warning.assert_called_once()
         call_args = mock_logger.warning.call_args
         message = call_args.args[0]
-        assert "startup check failed" in message.lower() or "RuntimeError" in str(call_args)
+        assert "startup check failed" in message.lower(), (
+            f"warning template missing 'startup check failed': {message!r}"
+        )
+        assert "RuntimeError" in str(call_args), (
+            f"warning args missing exception class: {call_args!r}"
+        )
+        assert exc_message in str(call_args), (
+            f"warning args missing exception message: {call_args!r}"
+        )
         mock_logger.error.assert_not_called()
 
     def test_module_import_survives_db_error(self):

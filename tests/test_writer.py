@@ -24,15 +24,24 @@ pytestmark = pytest.mark.skipif(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_doc_meta(source_path: str | None = None) -> DocumentMeta:
+def _make_doc_meta(
+    source_path: str | None = None,
+    company: str = "Test Corp",
+    ticker: str = "TST",
+    doc_type: str = "investor_presentation",
+    report_date: str = "2026-01",
+    doc_version: str = "2026-01",
+    doc_subtype: str = "unknown",
+) -> DocumentMeta:
     return DocumentMeta(
-        company="Test Corp",
-        ticker="TST",
-        doc_type="investor_presentation",
-        report_date="2026-01",
+        company=company,
+        ticker=ticker,
+        doc_type=doc_type,
+        report_date=report_date,
         period_covered="Q4 2025",
-        doc_version="2026-01",
+        doc_version=doc_version,
         source_path=source_path or f"test/path/{uuid4()}.pdf",
+        doc_subtype=doc_subtype,
     )
 
 
@@ -155,6 +164,48 @@ class TestWriteDocumentIdempotency:
             )
             count = cur.fetchone()[0]  # type: ignore[index]
         assert count == 1, f"Expected exactly 1 document row, found {count}"
+
+    def test_duplicate_source_path_preserves_original_metadata(self, real_conn):
+        """A second write_document with the same source_path but different metadata
+        must NOT overwrite the original row's fields. ON CONFLICT DO NOTHING leaves
+        the existing row untouched; the function only returns its id."""
+        from src.ingestion.writer import write_document
+
+        original = _make_doc_meta(
+            company="Test Corp",
+            ticker="TST",
+            doc_type="investor_presentation",
+            doc_version="2026-01",
+            doc_subtype="quarterly_investor_deck",
+        )
+        write_document(real_conn, original)
+
+        # Same source_path, different everything else — simulates a re-ingest
+        # where the metadata classifier changed its mind.
+        clobber = _make_doc_meta(
+            source_path=original.source_path,
+            company="Other Corp",
+            ticker="OTH",
+            doc_type="thematic_report",
+            doc_version="2025-99",
+            doc_subtype="thematic_report",
+        )
+        write_document(real_conn, clobber)
+
+        with real_conn.cursor() as cur:
+            cur.execute(
+                "SELECT company, ticker, doc_type, doc_version, doc_subtype "
+                "FROM documents WHERE source_path = %s",
+                (original.source_path,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        company, ticker, doc_type, doc_version, doc_subtype = row
+        assert company == original.company
+        assert ticker == original.ticker
+        assert doc_type == original.doc_type
+        assert doc_version == original.doc_version
+        assert doc_subtype == original.doc_subtype
 
 
 # ---------------------------------------------------------------------------

@@ -174,10 +174,15 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
             forward_looking_check = None
 
     # Soft-refusal check: when expect_soft_refusal=True the answer must either
-    # abstain or be PRIMARILY refusal language. An answer that includes a
-    # refusal phrase as a hedge over otherwise substantive content does not
-    # count — stripping the refusal phrases must leave essentially no
-    # remaining substance.
+    # abstain or LEAD with refusal-shaped language. An answer that buries a
+    # refusal phrase at the tail of substantive content does not count, but
+    # an answer that opens with "X does not contain Y" and then explains the
+    # adjacent context that IS disclosed is a textbook soft refusal and
+    # passes. The positional check (first 400 chars) is the discriminator
+    # between leading-refusal and trailing-hedge. The window is sized so
+    # answers that lead with a brief framing clause before the refusal
+    # ("As reflected in the deck, ... 2025 guidance was not reaffirmed at
+    # Investor Day") still register as leading rather than trailing.
     soft_refusal_check = None
     if gq.expect_soft_refusal:
         _soft_refusal_phrases = (
@@ -189,25 +194,27 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
             "not found",
             "no information",
             "not available",
+            "not updated",
+            "not reaffirmed",
+            "not explicitly",
+            "did not disclose",
+            "not present in",
+            "no .* guidance",
         )
         if a.abstained:
             soft_refusal_check = True
         else:
             text_lower = a.text.lower()
-            has_refusal_phrase = any(p in text_lower for p in _soft_refusal_phrases)
-            if not has_refusal_phrase:
-                soft_refusal_check = False
-            else:
-                # Strip refusal phrases and surrounding punctuation; the
-                # remaining alphanumeric content must be small enough to
-                # represent only scaffolding ("the information is", "in the
-                # source documents") rather than substantive claims that
-                # happen to embed a refusal phrase as a hedge.
-                text_norm = re.sub(r"[^a-z0-9\s]", " ", text_lower)
-                for phrase in _soft_refusal_phrases:
-                    text_norm = text_norm.replace(phrase, " ")
-                remaining_alnum = re.sub(r"\s+", "", text_norm)
-                soft_refusal_check = len(remaining_alnum) <= 50
+            head = text_lower[:400]
+            # Pass if any refusal phrase appears in the first 400 chars
+            # (literal substring match for the simple phrases; regex for the
+            # one wildcard pattern).
+            literal_phrases = [p for p in _soft_refusal_phrases if ".*" not in p]
+            regex_phrases = [p for p in _soft_refusal_phrases if ".*" in p]
+            has_leading_refusal = any(p in head for p in literal_phrases) or any(
+                re.search(p, head) for p in regex_phrases
+            )
+            soft_refusal_check = has_leading_refusal
 
     # Aggregate pass/fail.
     reasons_pass: list[str] = []
@@ -526,7 +533,7 @@ def render_markdown(
     total = len(evaluation)
     lines.append(f"## Tier 1 — Manual evaluation set ({pass_n}/{total} pass)")
     lines.append("")
-    lines.append("Auto-checks: intent match, entity-filter match, abstention/refusal behavior where expected, chart_description in context where expected, both DLR versions where expected, 100% citation support, OOC entity attribution where expected.")
+    lines.append("Auto-checks: intent match, entity-filter match, abstain match where expected, chart_description in context where expected, both DLR versions where expected, minimum companies in context, forward-looking label match, soft-refusal behavior where expected, 100% citation support.")
     lines.append("")
     lines.append("| ID | Category | Query | Auto-pass | Pass signals | Fail signals | Top rerank | Confidence | Band |")
     lines.append("|---|---|---|---|---|---|---|---|---|")

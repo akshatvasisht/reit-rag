@@ -103,8 +103,29 @@ def check_contextual_activation() -> None:
 
 CANDIDATES_PER_RETRIEVER = 50   # top-K from BM25 and from vector
 FUSED_TOP_N = 40                # candidates passed to reranker
-RERANK_TOP_N = 5                # contexts returned to the LLM
+RERANK_TOP_N = 5                # default contexts returned to the LLM
 RRF_K = 60                      # standard RRF constant
+
+# Per-intent rerank-budget overrides. Intents that span multiple deck versions
+# or multiple issuers need a wider top-K because the answer is built from
+# evidence chunks that compete with each other for rerank positions —
+# squeezing them through a 5-chunk gate drops legitimate same-page-different-
+# version siblings (comparison) or the second-issuer's primary chunk
+# (synthesis). Other intents (latest, conflict, the default) use the tight 5.
+_RERANK_TOP_N_BY_INTENT: dict[str, int] = {
+    "comparison": 8,
+    "all_company_synthesis": 8,
+    "historical": 7,
+}
+
+
+def _rerank_budget_for_intent(intent: str, default: int = RERANK_TOP_N) -> int:
+    """Return the rerank-top-N budget appropriate for the given intent.
+
+    Pure function so the dispatch is unit-testable in isolation from the
+    retrieval pipeline.
+    """
+    return _RERANK_TOP_N_BY_INTENT.get(intent, default)
 
 # Hard cap on total context chunks sent to the LLM.  When conflict chunks are
 # injected, the lowest-scoring retained chunks are dropped first (never the
@@ -327,6 +348,109 @@ def expand_table_pairs(
             "  [table-pair] added %d table/chart chunk(s) for %d text chunk(s)",
             len(to_add),
             sum(1 for rc in contexts if rc.chunk.content_type == "text" and rc.chunk.page_number is not None),
+        )
+
+    return contexts + to_add
+
+
+def expand_sibling_pages(
+    contexts: list[RetrievedChunk],
+    conn,
+    max_per_page: int = 4,
+) -> list[RetrievedChunk]:
+    """Append same-page sibling chunks for every page represented by a reranked
+    chunk in the retained set.
+
+    Addresses two failure modes that the per-chunk retrieval can't reach on its
+    own. (1) Sparse microchunks: a chunk whose ``chunk_text`` is just a tiny
+    fragment (e.g. ``"$60 Bn"`` alone) cannot enter top-K via BM25/vector
+    because it has no surrounding vocabulary to match a query. (2) Split
+    entities: the data lives in one chunk (e.g. a table row) while the
+    narrative framing lives in a sibling on the same page. Both cases are
+    addressed by pulling the page's other chunks into the candidate set once
+    any chunk on that page is already retained.
+
+    Unlike ``expand_table_pairs`` (text-chunk → same-page table/chart only),
+    this stage is content-type-agnostic on both ends.
+
+    Only chunks with a non-None ``rerank_score`` trigger expansion — chunks
+    that arrived via a prior expansion stage (parent, sibling, table-pair)
+    have ``rerank_score=None`` and are skipped, so expansion never cascades.
+
+    Each appended chunk has ``rerank_score=None`` and
+    ``retrieval_stage="sibling_page_expanded"`` with the trigger chunk's id
+    and a human-readable expansion reason for diagnostics.
+
+    Args:
+        contexts: Retained chunks after rerank (+ optional parent/sibling/
+            table-pair stages).
+        conn: Open psycopg connection.
+        max_per_page: Maximum sibling chunks pulled per (document_id,
+            page_number). Caps the expansion so the source-panel display is
+            not flooded.
+
+    Returns:
+        Original list plus up to ``max_per_page`` additional same-page
+        siblings per visited page, deduplicated across the whole list.
+    """
+    seen_ids = {rc.chunk.id for rc in contexts}
+    visited_pages: set[tuple] = set()  # (document_id, page_number)
+    to_add: list[RetrievedChunk] = []
+
+    sql = f"""
+        SELECT {_CHUNK_SELECT}
+        FROM chunks
+        WHERE document_id = %s
+          AND page_number = %s
+          AND id != ALL(%s)
+          AND is_parent = FALSE
+        ORDER BY id
+        LIMIT %s
+    """
+
+    for rc in contexts:
+        # Skip chunks that arrived via prior expansion — only rerank-scored
+        # chunks are valid expansion triggers, preventing cascade.
+        if rc.rerank_score is None:
+            continue
+        if rc.chunk.page_number is None:
+            continue
+        key = (rc.chunk.document_id, rc.chunk.page_number)
+        if key in visited_pages:
+            continue
+        visited_pages.add(key)
+
+        doc_id = str(rc.chunk.document_id)
+        page = rc.chunk.page_number
+        excluded_ids = [str(i) for i in seen_ids]
+        with conn.cursor() as cur:
+            cur.execute(sql, [doc_id, page, excluded_ids, max_per_page])
+            if cur.description is None:
+                continue
+            cols = [d.name for d in cur.description]
+            rows = cur.fetchall()
+        added_for_page = 0
+        for row in rows:
+            if added_for_page >= max_per_page:
+                break
+            chunk = Chunk.from_row(row, cols)
+            if chunk.id in seen_ids:
+                continue
+            new_rc = RetrievedChunk(chunk=chunk)
+            new_rc.retrieval_stage = "sibling_page_expanded"
+            new_rc.trigger_chunk_id = str(rc.chunk.id)
+            new_rc.expansion_reason = (
+                f"same-page sibling on page {page} for trigger chunk {rc.chunk.id}"
+            )
+            to_add.append(new_rc)
+            seen_ids.add(chunk.id)
+            added_for_page += 1
+
+    if to_add:
+        logger.info(
+            "  [sibling-page] added %d sibling(s) across %d page(s)",
+            len(to_add),
+            len(visited_pages),
         )
 
     return contexts + to_add
@@ -581,40 +705,51 @@ def _apply_post_rerank_pipeline(
     else:
         with_table_pairs = list(with_siblings)
 
-    # Stage 6 — cap after sibling/table-pair expansion. Expanded chunks are
-    # lower-priority than core, but table_pair_expanded chunks are higher-
-    # priority than sibling_expanded chunks because they were pulled in
-    # because a same-page text chunk was already retained (more direct
-    # relevance signal). When trimming, keep table-pair before sibling.
-    if len(with_table_pairs) > max_chunks:
-        # "core" = everything that was present before Stage 5/5b expansions
+    # Stage 5c — sibling-page expansion (answered path only).
+    # For every page touched by a rerank-scored chunk, pull in up to four
+    # additional same-page chunks of any content type. Addresses sparse-
+    # microchunk and split-entity cases where the target answer's surrounding
+    # context lives on the same page but in a different chunk that did not
+    # match the query lexically on its own.
+    if not abstain:
+        with_sibling_pages = expand_sibling_pages(with_table_pairs, conn)
+    else:
+        with_sibling_pages = list(with_table_pairs)
+
+    # Stage 6 — cap after all expansion stages. Expanded chunks are
+    # lower-priority than core; within expansion, table_pair_expanded has the
+    # strongest signal (same-page data-rich chunk pulled because its text
+    # sibling was already retained), then sibling_page_expanded (same-page
+    # any content type), then sibling_expanded (adjacent-page borderline).
+    if len(with_sibling_pages) > max_chunks:
+        # "core" = everything that was present before Stage 5/5b/5c expansions
         core_ids = {rc.chunk.id for rc in expanded}
-        expanded_part = [rc for rc in with_table_pairs if rc.chunk.id not in core_ids]
-        non_expanded_part = [rc for rc in with_table_pairs if rc.chunk.id in core_ids]
+        expanded_part = [rc for rc in with_sibling_pages if rc.chunk.id not in core_ids]
+        non_expanded_part = [rc for rc in with_sibling_pages if rc.chunk.id in core_ids]
         if len(non_expanded_part) >= max_chunks:
-            with_table_pairs = non_expanded_part[:max_chunks]
+            with_sibling_pages = non_expanded_part[:max_chunks]
             expansion_trimmed: list[RetrievedChunk] = []
         else:
             max_expanded = max_chunks - len(non_expanded_part)
-            # Priority: table_pair_expanded > sibling_expanded > anything else.
-            # Sort key keeps the original within-bucket order.
+            # Priority order: see comment above.
             _STAGE_PRIORITY = {
                 "table_pair_expanded": 0,
-                "sibling_expanded": 1,
+                "sibling_page_expanded": 1,
+                "sibling_expanded": 2,
             }
             expanded_sorted = sorted(
                 enumerate(expanded_part),
-                key=lambda kv: (_STAGE_PRIORITY.get(kv[1].retrieval_stage or "", 2), kv[0]),
+                key=lambda kv: (_STAGE_PRIORITY.get(kv[1].retrieval_stage or "", 3), kv[0]),
             )
             expansion_trimmed = [rc for _, rc in expanded_sorted[:max(0, max_expanded)]]
-            with_table_pairs = non_expanded_part + expansion_trimmed
+            with_sibling_pages = non_expanded_part + expansion_trimmed
         logger.info(
             "  [post-rerank] expansion cap: %d core + %d expanded = %d (cap=%d)",
-            len(non_expanded_part), len(expansion_trimmed), len(with_table_pairs), max_chunks,
+            len(non_expanded_part), len(expansion_trimmed), len(with_sibling_pages), max_chunks,
         )
 
-    logger.info("  [post-rerank] after table-pair expansion: %d", len(with_table_pairs))
-    return with_table_pairs
+    logger.info("  [post-rerank] after sibling-page expansion: %d", len(with_sibling_pages))
+    return with_sibling_pages
 @dataclass
 class RetrievalResult:
     """Output bundle from `retrieve()` — contexts plus diagnostics for the UI."""
@@ -789,9 +924,15 @@ def retrieve(
     """
     intent, forward_looking = classify_intent_full(query)
     companies = extract_companies(query)
+    # Apply per-intent rerank-budget override when the caller did not pass a
+    # custom rerank_top_n. Comparison / synthesis / historical queries assemble
+    # answers from multiple evidence chunks that compete for rerank positions;
+    # the default 5-chunk gate drops legitimate siblings on those intents.
+    if rerank_top_n == RERANK_TOP_N:
+        rerank_top_n = _rerank_budget_for_intent(intent)
     logger.info(
-        "Query intent: %s | forward_looking=%s | companies=%s | %s",
-        intent, forward_looking, companies, query,
+        "Query intent: %s | forward_looking=%s | companies=%s | rerank_top_n=%d | %s",
+        intent, forward_looking, companies, rerank_top_n, query,
     )
 
     # All-company synthesis: run a separate retrieval pass per corpus company so

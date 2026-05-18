@@ -32,7 +32,7 @@ Hybrid: BM25 (PostgreSQL tsvector) and dense (Qwen3-Embedding-0.6B + pgvector HN
 
 ## Versioning
 
-Documents are grouped into version groups by `(company, doc_type)`, ordered by `report_date`. An intent classifier reads the query for `latest` (default), `historical`, or `comparison` triggers. For `latest` intent, version-group deduplication suppresses older versions before the LLM sees context, so the model never silently averages between (for example) DLR's December 2025 and March 2026 figures. For `comparison` intent ("how did DLR change between Dec and Mar"), both versions are retained and the answer surfaces each with its date in the citation.
+Documents are grouped into version groups by `(company, doc_type, doc_subtype)`, ordered by `report_date`. An intent classifier reads the query for `latest` (default), `historical`, `comparison`, `conflict`, or `all_company_synthesis`. For `latest` intent, version-group deduplication suppresses older versions before the LLM sees context, so the model never silently averages between (for example) DLR's December 2025 and March 2026 figures. For `comparison` intent ("how did DLR change between Dec and Mar"), both versions are retained and the answer surfaces each with its date in the citation.
 
 ## Conflicting Information
 
@@ -66,7 +66,7 @@ The weighted sum is clamped to [0, 1] and mapped to three display bands:
 
 For the all-company synthesis path (one sub-retrieval per corpus company), the cross-company score gap is not meaningful — each company was retrieved independently. Confidence is instead the mean of per-company magnitude signals for companies that returned scored chunks.
 
-Confidence is computed on the post-rerank chunk list, before conflict-chunk injection and sibling expansion, so synthetic scores assigned to conflict/sibling chunks do not skew the result.
+Confidence is computed on the post-rerank chunk list, before conflict injection and expansion stages (parent/sibling/table-pair/same-page expansions), so synthetic or unscored expanded chunks do not skew the result.
 
 ## Known Limitations
 

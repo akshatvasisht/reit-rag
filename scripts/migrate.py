@@ -174,10 +174,9 @@ STEPS: list[tuple[str, str]] = [
         """,
     ),
     (
-        "recreate_index_chunks_embedding_hnsw",
+        "create_index_chunks_embedding_hnsw",
         """
-        DROP INDEX IF EXISTS chunks_embedding_hnsw;
-        CREATE INDEX chunks_embedding_hnsw
+        CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw
             ON chunks USING hnsw (embedding halfvec_cosine_ops)
             WITH (m = 16, ef_construction = 200);
         """,
@@ -218,10 +217,9 @@ STEPS: list[tuple[str, str]] = [
         """,
     ),
     (
-        "recreate_index_chunks_ctx_embed_hnsw",
+        "create_index_chunks_ctx_embed_hnsw",
         """
-        DROP INDEX IF EXISTS chunks_ctx_embed_hnsw;
-        CREATE INDEX chunks_ctx_embed_hnsw
+        CREATE INDEX IF NOT EXISTS chunks_ctx_embed_hnsw
             ON chunks USING hnsw (contextualized_embedding halfvec_cosine_ops)
             WITH (m = 16, ef_construction = 200);
         """,
