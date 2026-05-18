@@ -184,3 +184,286 @@ def test_basis_points_match() -> None:
     claim = _make_claim("Spread tightened 25bps.", value="25bps")
     issues = check_numeric_consistency(_make_answer([claim]), contexts)
     assert issues == []
+
+
+# ---------------------------------------------------------------------------
+# Baseline normalization fixes (Unicode dash, approx marker, range parsing)
+# Previously labelled "baseline" in the register — implemented here.
+# ---------------------------------------------------------------------------
+
+
+def test_approximation_marker_tilde_matches() -> None:
+    """Claim '~5.7%' must match chunk '5.7%' — approx marker stripped."""
+    chunk = _make_chunk(chunk_text="Annualized dividend yield was 5.7% as of year-end.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Yield was approximately 5.7%.", value="~5.7%")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == []
+
+
+def test_approximation_word_approximately_matches() -> None:
+    """Claim 'approximately 5.7%' must match chunk '5.7%'."""
+    chunk = _make_chunk(chunk_text="Yield was 5.7% at quarter end.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Approximately 5.7% yield.", value="approximately 5.7%")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == []
+
+
+def test_unicode_en_dash_in_chunk_matches_ascii_hyphen_claim() -> None:
+    """Chunk uses U+2013 en-dash ('8–12%'), claim uses ASCII hyphen ('8-12%')."""
+    chunk = _make_chunk(chunk_text="2026 same-store NOI guidance: 8–12% growth.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Guidance is 8-12% growth.", value="8-12%")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == []
+
+
+def test_claim_range_matches_chunk_endpoints_separately() -> None:
+    """Range claim '$7.90-$8.00' accepted when both endpoints in chunk values."""
+    chunk = _make_chunk(chunk_text="2026 Core FFO guidance: $7.90 to $8.00 per share.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Guidance is $7.90-$8.00.", value="$7.90-$8.00")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == []
+
+
+def test_single_value_within_chunk_range_accepted() -> None:
+    """Claim '5.2x' is inside chunk's stated range '5.0-5.5x target'."""
+    chunk = _make_chunk(chunk_text="Net leverage target is 5.0-5.5x.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Net leverage is 5.2x.", value="5.2x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == []
+
+
+# ---------------------------------------------------------------------------
+# Composite multi-value claim splitting
+# ---------------------------------------------------------------------------
+
+
+def test_composite_semicolon_separated_values_match() -> None:
+    """'~89% end of 2026; 87.25%–88% average' — semicolon split, atoms in chunk."""
+    chunk = _make_chunk(chunk_text="Leased 89% at end of 2026, average 87.25%-88%.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("BXP occupancy.", value="~89% end of 2026; 87.25%–88% average")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_composite_percent_with_parenthetical_period_match() -> None:
+    """'86.4% (Q2 2025), ~86.9% (Q4 2025)' — comma-parenthetical split."""
+    chunk = _make_chunk(chunk_text="Occupancy was 86.4% in Q2 2025 and 86.9% in Q4 2025.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Occupancy.", value="86.4% (Q2 2025), ~86.9% (Q4 2025)")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_composite_slash_separated_values_match() -> None:
+    """'~$7Bn / 4.9x' — slash-separated composite."""
+    chunk = _make_chunk(chunk_text="DLR had ~$7B in liquidity and leverage of 4.9x.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("DLR liquidity and leverage.", value="~$7Bn / 4.9x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_composite_dollar_and_percent_match() -> None:
+    """'$1,246.2M (39%)' — dollar amount + parenthetical percentage."""
+    chunk = _make_chunk(
+        chunk_text="Caesars: $1,246.2M annualized cash rent (39% of total)."
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Caesars rent.", value="$1,246.2M (39%)")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_composite_geographic_percentages_match() -> None:
+    """'North America 52%, Europe 29%, APAC 10%' — multi-percentage composite."""
+    chunk = _make_chunk(
+        chunk_text="Geographic mix: North America 52%, Europe 29%, APAC 10%."
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim(
+        "DLR geographic breakdown.",
+        value="North America 52%, Europe 29%, APAC 10%",
+    )
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Spelled-out scale words
+# ---------------------------------------------------------------------------
+
+
+def test_chk2_spelled_out_billion_matches_B_suffix() -> None:
+    """'$10.5 billion' must match chunk '$10.5' (PSA merger psa-merg-basic-1)."""
+    chunk = _make_chunk(chunk_text="NSA enterprise value: $10.5 ($ billions).")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("NSA EV was $10.5 billion.", value="$10.5 billion")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_chk2_spelled_out_billion_matches_B_tagged_chunk() -> None:
+    """'$6.2 billion' claim matches chunk '$6.2B' (Realty Income o-adv-6)."""
+    chunk = _make_chunk(chunk_text="Annual investment volume approximately $6.2B.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Investment volume was $6.2 billion.", value="$6.2 billion")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Parenthetical negative / sign-stripped values
+# ---------------------------------------------------------------------------
+
+
+def test_chk3_negative_claim_matches_positive_chunk() -> None:
+    """'-3.6%' claim matches chunk '3.6%' (sign stripped in chart; psa-cu-adv-5)."""
+    chunk = _make_chunk(
+        chunk_text="NSA same-store NOI growth: 3.6% (negative bar chart)."
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("NSA growth was -3.6%.", value="-3.6%")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_chk3_parenthetical_negative_matches_positive_chunk() -> None:
+    """'($22.3M)' claim (accounting-negative) matches chunk '$22.3' (bxp-morn-adv-7)."""
+    chunk = _make_chunk(chunk_text="JV losses: $22.3 million write-down.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("JV net loss was ($22.3M).", value="($22.3M)")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Non-financial units (years, MW, sqft, dates)
+# ---------------------------------------------------------------------------
+
+
+def test_chk4_years_unit_uses_substring_check() -> None:
+    """'39.6 years' does not fire mismatch when present in chunk text (VICI xdoc-adv-5)."""
+    chunk = _make_chunk(
+        chunk_text="Portfolio WALT: 39.6 years (inclusive of all renewal options)."
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("VICI WALT is 39.6 years.", value="39.6 years")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_chk4_kw_unit_uses_substring_check() -> None:
+    """'27 kW per rack in 2025' — non-financial unit, substring check (dlr-adv-8)."""
+    chunk = _make_chunk(
+        chunk_text="Rack density rising: from 7 kW in 2021 to 27 kW per rack in 2025."
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Rack density reached 27 kW per rack in 2025.", value="27 kW per rack in 2025")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_chk4_sqft_unit_uses_substring_check() -> None:
+    """'65 million square feet' — non-financial unit, substring check (egp-basic-1)."""
+    chunk = _make_chunk(
+        chunk_text="65 Million Square Feet Under Ownership by EastGroup Properties."
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("EGP owns 65 million square feet.", value="65 million square feet")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_chk4_date_value_skipped() -> None:
+    """'January 27, 2026' as claim value — date string, no numeric mismatch (xdoc-std-6)."""
+    chunk = _make_chunk(chunk_text="Board declared dividend payable January 27, 2026.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Payment date is January 27, 2026.", value="January 27, 2026")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Trailing annotation / non-numeric proper noun
+# ---------------------------------------------------------------------------
+
+
+def test_chk5_trailing_annotation_stripped() -> None:
+    """'$2.80 per share annualized' — $2.80 is in chunk, trailing annotation skipped."""
+    chunk = _make_chunk(chunk_text="Quarterly dividend: $0.70 per share ($2.80 annualized).")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Dividend is $2.80 per share annualized.", value="$2.80 per share annualized")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_chk5_proper_noun_claim_skipped() -> None:
+    """'Norges' as claim value — non-numeric proper noun, no mismatch (bxp-morn-adv-3)."""
+    chunk = _make_chunk(chunk_text="Norges Bank Investment Management holds 45% interest.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("The JV partner is Norges.", value="Norges")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# MM (double-M) suffix
+# ---------------------------------------------------------------------------
+
+
+def test_chk6_mm_suffix_matches_m_in_chunk() -> None:
+    """'$1,246.2MM' claim matches chunk '$1,246.2M' (vici-adv-3 / xdoc-adv-7)."""
+    chunk = _make_chunk(chunk_text="Caesars total annualized cash rent: $1,246.2M.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Caesars rent is $1,246.2MM.", value="$1,246.2MM")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_chk6_mm_composite_with_percent() -> None:
+    """'$1,246.2MM (39%)' — MM suffix + parenthetical composite (vici-basic-1)."""
+    chunk = _make_chunk(
+        chunk_text="Caesars: $1,246.2M annualized cash rent (39% of total)."
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Caesars rent share.", value="$1,246.2MM (39%)")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Comparison prefix > < ≥ ≤
+# ---------------------------------------------------------------------------
+
+
+def test_chk7_greater_than_prefix_stripped() -> None:
+    """'>$15B' claim matches chunk '$15B' (dlr-adv-7 NNM-1 dlr liquidity)."""
+    chunk = _make_chunk(
+        chunk_text="DLR has more than $15B in JV and fund capital available."
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("JV capital is >$15B.", value=">$15B")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Dollar-in-thousands table format
+# ---------------------------------------------------------------------------
+
+
+def test_chk8_dollar_thousands_annotation_stripped() -> None:
+    """'$28,183 thousand' — strip thousand annotation and check bare integer (xdoc-std-5)."""
+    chunk = _make_chunk(
+        chunk_text="$ in thousands\nRental revenues\t28,183\t51,665"
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Rental revenues were $28,183 thousand.", value="$28,183 thousand")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
