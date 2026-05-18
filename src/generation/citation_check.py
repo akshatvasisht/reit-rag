@@ -283,11 +283,15 @@ def _parse_numeric(value: str) -> float | None:
     v = value.strip().lower()
 
     # Convert accounting-negative parentheticals: (N) or ($N) → -N.
-    paren_match = re.match(r"^\((\$?[\d,]+(?:\.\d+)?[bmkt]?)\)%?$", v)
+    # Handles unit INSIDE parens: (1.8%) → -1.8%   (4.9x) → -4.9x
+    # AND unit OUTSIDE parens:    (1.8)% → -1.8%   (22.3M) → -22.3M
+    paren_match = re.match(
+        r"^\((\$?[\d,]+(?:\.\d+)?(?:%|x|bps|bp|[bmkt])?)\)(%|x|bps|bp)?$", v
+    )
     if paren_match:
         inner = paren_match.group(1)
-        suffix = "%" if v.endswith(")%") else ""
-        v = "-" + inner + suffix
+        outer_unit = paren_match.group(2) or ""
+        v = "-" + inner + outer_unit
 
     # Normalise spelled-out scale words ("$10.5 billion" → "$10.5b").
     scale_match = _SCALE_WORD_RE.search(v)
@@ -402,15 +406,34 @@ def _split_composite_value(value: str) -> list[str]:
         if re.fullmatch(r"\([^()]+\)", stripped):
             paren_parts.append(stripped)
             continue
+        # Also treat whole-string $(N) as an accounting negative token.
+        if re.fullmatch(r"\$\([^()]+\)", stripped):
+            # Rewrite to canonical ($N) form so _parse_numeric handles it.
+            paren_parts.append("(" + "$" + stripped[2:])
+            continue
+        # Regex matches $( prefix as well so the leading $ is consumed along
+        # with the parenthetical and re-attached inside the inner token.
         paren_matches = list(re.finditer(r"\(([^()]+)\)", stripped))
         if paren_matches:
-            outer = re.sub(r"\s*\([^()]+\)\s*", " ", stripped).strip()
+            # Build inner tokens, re-attaching any immediately-preceding $ that
+            # was left stranded when the outer substitution removed "$(N)".
+            inner_tokens: list[str] = []
+            for m in paren_matches:
+                start = m.start()
+                dollar_prefix = "$" if start > 0 and stripped[start - 1] == "$" else ""
+                inner_val = m.group(1).strip()
+                if inner_val:
+                    inner_tokens.append(
+                        "(" + dollar_prefix + inner_val + ")" if dollar_prefix else inner_val
+                    )
+            # Remove $(…) and (…) from the outer string. Strip the leading $
+            # that belonged to a $(…) group.
+            outer = re.sub(r"\$\s*\([^()]+\)\s*|\s*\([^()]+\)\s*", " ", stripped).strip()
+            # Clean up any trailing comma or dollar left by the substitution.
+            outer = outer.rstrip(",$").strip()
             if outer:
                 paren_parts.append(outer)
-            for m in paren_matches:
-                inner = m.group(1).strip()
-                if inner:
-                    paren_parts.append(inner)
+            paren_parts.extend(inner_tokens)
         else:
             paren_parts.append(stripped)
     comma_parts: list[str] = []
@@ -756,12 +779,14 @@ def check_numeric_consistency(
         # handle them.
         any_atom_has_numeric = False
         all_atoms_found = True
+        failing_atom_was_financial = False
 
         for atom in atoms:
             # Check if this atom has any numeric content to verify
             atom_stripped, _ = _strip_approx(_unicode_normalize(atom))
+            atom_is_financial = bool(FINANCIAL_NUMBER_RE.search(atom_stripped))
             # Skip pure annotation atoms (text without financial digits)
-            if not FINANCIAL_NUMBER_RE.search(atom_stripped) and not _is_non_financial_unit_value(atom):
+            if not atom_is_financial and not _is_non_financial_unit_value(atom):
                 # Pure proper-noun / non-numeric atom — skip.
                 if _is_non_numeric_proper_noun(atom):
                     continue
@@ -770,11 +795,23 @@ def check_numeric_consistency(
 
             if not _atom_found_in_chunk(atom, chunk_text, chunk_values):
                 all_atoms_found = False
+                if atom_is_financial:
+                    failing_atom_was_financial = True
                 break
 
         if any_atom_has_numeric and not all_atoms_found:
+            # When the failing atom carries financial-numeric content AND the
+            # cited chunk extracts zero financial values of any class, the
+            # claim has no basis in the chunk at all — the chunk is likely a
+            # section header, narrative paragraph, or non-data excerpt that
+            # should not have been cited for a numeric claim. Emit a stronger
+            # issue type so downstream graders can distinguish this wrong-
+            # chunk-class case from an ordinary value mismatch.
+            issue_type = "numeric_mismatch"
+            if failing_atom_was_financial and not chunk_values:
+                issue_type = "wrong_chunk_no_financial_values"
             issues.append({
-                "type": "numeric_mismatch",
+                "type": issue_type,
                 "claim": claim.text,
                 "claimed_value": claim.value,
                 "chunk_values_found": chunk_values,
@@ -827,93 +864,3 @@ def _normalize_doc_type(raw: str) -> str:
     """
     base = re.sub(r"\s*\([^()]*\)\s*", " ", raw)
     return " ".join(base.replace("_", " ").split()).strip().lower()
-
-
-# ---------------------------------------------------------------------------
-# Out-of-corpus entity attribution guard
-# ---------------------------------------------------------------------------
-
-
-def check_ooc_entity_attribution(
-    answer: StructuredAnswer,
-    query: str,
-    corpus_companies: list[str],
-) -> list[dict]:
-    """Detect claims that attribute a specific value to an out-of-corpus entity.
-
-    When a query names a company that does not appear as a primary corpus
-    subject, a retrieved chunk from a different company may mention that
-    entity incidentally (e.g., in a peer comparison table). If the model
-    then attributes a specific figure to the out-of-corpus entity while
-    citing the in-corpus document, the citation check passes but the answer
-    is contextually wrong.
-
-    Uses ``extract_entity_candidates`` rather than ``extract_companies`` so
-    entity names that are NOT in the corpus can be detected.
-    ``extract_companies`` only returns canonical corpus names, so
-    ``ooc_entities`` would always be empty when using it here.
-
-    corpus_set is built from canonical names AND every ``keywords`` alias
-    declared in ``CORPUS_REGISTRY`` so tickers ("VICI", "Simon") resolve
-    as in-corpus.
-
-    The claim-text match uses a word-boundary regex so a short ticker like
-    "VICI" does not match inside "vicinity". Issues are deduplicated on
-    ``(claim_text, citing_company)``.
-
-    Returns a list of issue dicts. An empty list means no such pattern was
-    detected. Abstaining answers are skipped entirely.
-    """
-    # Local import avoids any potential circular-import path through the
-    # retrieval → ingestion → generation import chain.
-    from src.retrieval.entity_filter import extract_entity_candidates  # noqa: PLC0415
-
-    issues: list[dict] = []
-    queried_entities = extract_entity_candidates(query)
-
-    from src.corpus_registry import CORPUS_REGISTRY  # noqa: PLC0415
-    corpus_set: set[str] = {c.lower() for c in corpus_companies}
-    for entry in CORPUS_REGISTRY:
-        for kw in entry.get("keywords", []):
-            corpus_set.add(kw.lower())
-        ticker = entry.get("ticker")
-        if ticker:
-            corpus_set.add(ticker.lower())
-
-    ooc_entities = [e for e in queried_entities if e.lower() not in corpus_set]
-
-    if not ooc_entities or answer.abstain:
-        return issues
-
-    seen_issues: set[tuple[str, str]] = set()
-
-    for claim in answer.claims:
-        if not claim.value:
-            continue
-        for ooc in ooc_entities:
-            if not re.search(rf"\b{re.escape(ooc)}\b", claim.text, re.IGNORECASE):
-                continue
-            if claim.citation_company.lower() == ooc.lower():
-                continue
-
-            dedup_key = (claim.text, claim.citation_company)
-            if dedup_key in seen_issues:
-                continue
-            seen_issues.add(dedup_key)
-
-            issues.append({
-                "type": "ooc_entity_attribution",
-                "ooc_entity": ooc,
-                "claim_text": claim.text,
-                "claimed_value": claim.value,
-                "citing_company": claim.citation_company,
-                "explanation": (
-                    f"Answer attributes '{claim.value}' to {ooc} "
-                    f"but cites [{claim.citation_company}] as the source. "
-                    f"{ooc} is not in the indexed corpus — "
-                    f"this figure likely comes from an incidental mention "
-                    f"in {claim.citation_company}'s document."
-                ),
-            })
-
-    return issues

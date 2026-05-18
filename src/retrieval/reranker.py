@@ -100,7 +100,7 @@ def rerank_with_model(
         return []
 
     effective_top_n = min(top_n, len(candidates))
-    pairs: list[tuple[str, str]] = [(query, rc.chunk.chunk_text) for rc in candidates]
+    pairs: list[tuple[str, str]] = [(query, rc.chunk.contextualized_text or rc.chunk.chunk_text) for rc in candidates]
 
     model = _get_registry_encoder(model_name, revision)
     raw_scores = model.predict(cast(Any, pairs))
@@ -157,7 +157,7 @@ def rerank(
             len(candidates),
         )
 
-    pairs: list[tuple[str, str]] = [(query, rc.chunk.chunk_text) for rc in candidates]
+    pairs: list[tuple[str, str]] = [(query, rc.chunk.contextualized_text or rc.chunk.chunk_text) for rc in candidates]
 
     model = _get_cross_encoder()
     # predict() can return ndarray or tensor depending on backend/config.

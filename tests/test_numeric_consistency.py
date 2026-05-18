@@ -243,7 +243,7 @@ def test_single_value_within_chunk_range_accepted() -> None:
 
 
 def test_composite_semicolon_separated_values_match() -> None:
-    """'~89% end of 2026; 87.25%–88% average' — semicolon split, atoms in chunk."""
+    """'~89% end of 2026; 87.25%–88% average' - semicolon split, atoms in chunk."""
     chunk = _make_chunk(chunk_text="Leased 89% at end of 2026, average 87.25%-88%.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("BXP occupancy.", value="~89% end of 2026; 87.25%–88% average")
@@ -465,5 +465,155 @@ def test_chk8_dollar_thousands_annotation_stripped() -> None:
     )
     contexts = [_make_rc(chunk)]
     claim = _make_claim("Rental revenues were $28,183 thousand.", value="$28,183 thousand")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Wrong-chunk-class detection — section-header / narrative chunks cited for
+# numeric claims when the chunk has zero financial values at all.
+# ---------------------------------------------------------------------------
+
+
+def test_section_header_chunk_emits_wrong_chunk_issue() -> None:
+    """A financial-numeric claim cited against a chunk whose text contains no
+    financial values at all (e.g. a section-title or narrative paragraph)
+    must produce a stronger issue type than a regular numeric mismatch."""
+    chunk = _make_chunk(chunk_text="Capital Structure\nOverview of leverage policy and targets")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Net debt to EBITDA was 4.9x.", value="4.9x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1
+    issue = issues[0]
+    assert issue["type"] == "wrong_chunk_no_financial_values"
+    assert issue["claimed_value"] == "4.9x"
+    assert issue["chunk_values_found"] == []
+
+
+def test_narrative_chunk_with_no_values_emits_wrong_chunk_issue() -> None:
+    """Pure narrative without any financial figures — same wrong-chunk class."""
+    chunk = _make_chunk(
+        chunk_text=(
+            "Our balance-sheet strategy emphasizes prudent capital allocation, "
+            "match-funding of acquisitions, and consistent investment-grade ratings."
+        )
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Leverage was reported at 8.18x as of Q2 2025.", value="8.18x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1
+    assert issues[0]["type"] == "wrong_chunk_no_financial_values"
+
+
+def test_non_financial_unit_claim_stays_as_regular_mismatch() -> None:
+    """When the failing atom is a non-financial unit (kW, sq ft, years), the
+    wrong-chunk classification does not apply — the substring path handles
+    these and the issue type remains the standard mismatch."""
+    chunk = _make_chunk(chunk_text="Power-density configurations vary by site.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Average rack density was 16.8 kW.", value="16.8 kW")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1
+    # The chunk text doesn't contain "16.8 kW" so substring fails, but the
+    # claim is non-financial-unit so it stays as a regular numeric_mismatch.
+    assert issues[0]["type"] == "numeric_mismatch"
+
+
+def test_chunk_with_unrelated_financial_value_stays_as_regular_mismatch() -> None:
+    """A chunk that DOES extract a financial value (just not the right one)
+    must remain a regular numeric_mismatch — the stronger wrong-chunk class
+    only applies when the chunk has zero financial values at all."""
+    chunk = _make_chunk(chunk_text="Revenue grew 12% year-over-year.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Revenue grew 25%.", value="25%")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1
+    assert issues[0]["type"] == "numeric_mismatch"
+    assert "12%" in issues[0]["chunk_values_found"]
+
+
+# ---------------------------------------------------------------------------
+# Composite multi-value claim splitting (new patterns)
+# ---------------------------------------------------------------------------
+
+
+def test_composite_comma_parenthetical_period_both_present_no_mismatch() -> None:
+    """'86.4% (Q2 2025), ~86.9% (Q4 2025)' — both values in chunk, no mismatch."""
+    chunk = _make_chunk(chunk_text="Occupancy was 86.4% in Q2 2025 and 86.9% in Q4 2025.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Occupancy trend.", value="86.4% (Q2 2025), ~86.9% (Q4 2025)")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_composite_comma_parenthetical_one_atom_missing_reports_mismatch() -> None:
+    """'86.4% (Q2 2025), ~76.3% (Q4 2025)' — 76.3% absent from chunk → mismatch.
+
+    Values chosen >1% apart so the 1% rounding tolerance does not mask the miss.
+    """
+    chunk = _make_chunk(chunk_text="Occupancy was 86.4% in Q2 2025.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Occupancy trend.", value="86.4% (Q2 2025), ~76.3% (Q4 2025)")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1, f"Expected 1 issue, got: {issues}"
+    assert issues[0]["type"] == "numeric_mismatch"
+    assert issues[0]["claimed_value"] == "86.4% (Q2 2025), ~76.3% (Q4 2025)"
+
+
+def test_composite_semicolon_both_present_no_mismatch() -> None:
+    """'4.2x; 4.9x' — semicolon-separated composite, both in chunk, no mismatch."""
+    chunk = _make_chunk(chunk_text="Revenue multiple was 4.2x and leverage was 4.9x.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Multiples.", value="4.2x; 4.9x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Parenthetical negative normalization
+# ---------------------------------------------------------------------------
+
+
+def test_paren_negative_percent_matches_explicit_negative_in_chunk() -> None:
+    """'(1.8%)' (accounting-negative notation) matches chunk '-1.8%' with no mismatch.
+
+    Before the fix _parse_numeric returned None for '(1.8%)' because the '%'
+    was inside the parentheses and the regex only accepted units outside.  The
+    fix extends the paren regex to handle units inside: (N%) → -N%.
+    """
+    chunk = _make_chunk(chunk_text="Same-store NOI growth: -1.8% year-over-year.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("NOI growth was (1.8%).", value="(1.8%)")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_paren_negative_percent_against_positive_chunk_accepted_by_design() -> None:
+    """'(1.8%)' against a chunk with positive '1.8%' is accepted (no mismatch).
+
+    This is consistent with the existing 'negative claim vs positive chunk' rule
+    (see test_chk3_negative_claim_matches_positive_chunk) — charts frequently
+    render negative bars without a sign, so a claim of -1.8% against a chunk
+    that only surfaces +1.8% is treated as a chart-rendering artefact, not a
+    factual mismatch.  Negative ≠ positive enforcement would require sign
+    context that is typically absent from extracted chart chunks.
+    """
+    chunk = _make_chunk(chunk_text="Same-store NOI growth: 1.8% year-over-year.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("NOI growth was (1.8%).", value="(1.8%)")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    # Intentionally no mismatch: existing design accepts |negative_claim| ≈ positive_chunk.
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_composite_with_paren_negative_dollar_splits_and_resolves() -> None:
+    """'$100M, $(50M)' — composite with a dollar-prefixed parenthetical negative.
+
+    Split must produce ['$100M', '($50M)'] and _parse_numeric('($50M)') = -50.
+    Both atoms must be found in the chunk for no mismatch.
+    """
+    chunk = _make_chunk(chunk_text="Net gain was $100M; net loss position was ($50M).")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Net positions.", value="$100M, $(50M)")
     issues = check_numeric_consistency(_make_answer([claim]), contexts)
     assert issues == [], f"Unexpected issues: {issues}"

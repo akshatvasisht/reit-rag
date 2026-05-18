@@ -22,7 +22,7 @@ _SELECT_COLS = """
     company, ticker, doc_type, report_date, period_covered, doc_version,
     section_title, page_number, content_type, source_authority,
     chunk_text, is_parent, token_count,
-    doc_subtype, page_content_class
+    doc_subtype, page_content_class, contextualized_text
 """.strip()
 
 # Exclude known-boilerplate classes from BM25 so legal disclaimers and index
@@ -51,9 +51,10 @@ WITH q AS (
 SELECT {_SELECT_COLS}
 FROM chunks, q
 WHERE is_parent = FALSE
-  AND COALESCE(contextualized_text_tsv, chunk_text_tsv) @@ tsq
+  AND (chunk_text_tsv || COALESCE(contextualized_text_tsv, ''::tsvector)) @@ tsq
   {_BOILERPLATE_FILTER}
-ORDER BY ts_rank_cd(COALESCE(contextualized_text_tsv, chunk_text_tsv), tsq) DESC
+ORDER BY ts_rank_cd(
+    chunk_text_tsv || COALESCE(contextualized_text_tsv, ''::tsvector), tsq) DESC
 LIMIT %s;
 """
 
@@ -67,10 +68,11 @@ WITH q AS (
 SELECT {_SELECT_COLS}
 FROM chunks, q
 WHERE is_parent = FALSE
-  AND COALESCE(contextualized_text_tsv, chunk_text_tsv) @@ tsq
+  AND (chunk_text_tsv || COALESCE(contextualized_text_tsv, ''::tsvector)) @@ tsq
   AND company = ANY(%s)
   {_BOILERPLATE_FILTER}
-ORDER BY ts_rank_cd(COALESCE(contextualized_text_tsv, chunk_text_tsv), tsq) DESC
+ORDER BY ts_rank_cd(
+    chunk_text_tsv || COALESCE(contextualized_text_tsv, ''::tsvector), tsq) DESC
 LIMIT %s;
 """
 
@@ -82,10 +84,11 @@ WITH q AS (
 SELECT {_SELECT_COLS}
 FROM chunks, q
 WHERE is_parent = FALSE
-  AND COALESCE(contextualized_text_tsv, chunk_text_tsv) @@ tsq
+  AND (chunk_text_tsv || COALESCE(contextualized_text_tsv, ''::tsvector)) @@ tsq
   AND content_type = ANY(%s)
   {_BOILERPLATE_FILTER}
-ORDER BY ts_rank_cd(COALESCE(contextualized_text_tsv, chunk_text_tsv), tsq) DESC
+ORDER BY ts_rank_cd(
+    chunk_text_tsv || COALESCE(contextualized_text_tsv, ''::tsvector), tsq) DESC
 LIMIT %s;
 """
 
@@ -97,11 +100,12 @@ WITH q AS (
 SELECT {_SELECT_COLS}
 FROM chunks, q
 WHERE is_parent = FALSE
-  AND COALESCE(contextualized_text_tsv, chunk_text_tsv) @@ tsq
+  AND (chunk_text_tsv || COALESCE(contextualized_text_tsv, ''::tsvector)) @@ tsq
   AND company = ANY(%s)
   AND content_type = ANY(%s)
   {_BOILERPLATE_FILTER}
-ORDER BY ts_rank_cd(COALESCE(contextualized_text_tsv, chunk_text_tsv), tsq) DESC
+ORDER BY ts_rank_cd(
+    chunk_text_tsv || COALESCE(contextualized_text_tsv, ''::tsvector), tsq) DESC
 LIMIT %s;
 """
 

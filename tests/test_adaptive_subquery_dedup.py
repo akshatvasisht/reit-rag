@@ -10,7 +10,7 @@ Covers:
 from __future__ import annotations
 
 import importlib
-from typing import Any
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -66,10 +66,14 @@ def _make_initial_result(
     )
 
 
-def _make_tool_use_response(sub_query: str, company_filter: list[str] = []) -> MagicMock:
+def _make_tool_use_response(
+    sub_query: str, company_filter: Optional[list[str]] = None
+) -> MagicMock:
+    if company_filter is None:
+        company_filter = []
     tool_block = MagicMock()
     tool_block.type = "tool_use"
-    tool_block.input = {"query": sub_query, "company_filter": company_filter}
+    tool_block.input = {"query": sub_query, "company_filter": list(company_filter)}
     response = MagicMock()
     response.stop_reason = "tool_use"
     response.content = [tool_block]

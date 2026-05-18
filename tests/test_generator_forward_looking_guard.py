@@ -151,7 +151,7 @@ def test_detect_forward_looking_intent_negative_occupancy_query() -> None:
 def test_chunks_support_guidance_language_present() -> None:
     """Chunk with 'guidance' token must return True."""
     from src.generation.generator import _chunks_have_forward_looking_support
-    chunks = [_make_chunk(text="Management guided 2026 FFO of $7.10–$7.30 per share.")]
+    chunks = [_make_chunk(text="Management guided 2026 FFO of $7.10-$7.30 per share.")]
     assert _chunks_have_forward_looking_support(chunks) is True
 
 
@@ -163,7 +163,7 @@ def test_chunks_support_expect_language_present() -> None:
 
 def test_chunks_support_target_language_present() -> None:
     from src.generation.generator import _chunks_have_forward_looking_support
-    chunks = [_make_chunk(text="Our target range for 2026 FFO is $7.00–$7.50.")]
+    chunks = [_make_chunk(text="Our target range for 2026 FFO is $7.00-$7.50.")]
     assert _chunks_have_forward_looking_support(chunks) is True
 
 
@@ -228,7 +228,6 @@ def test_system_prompt_gets_fl_injection_when_query_is_guidance_and_chunks_lack_
         supported=0, total=0, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     result = generator.answer("What is BXP's 2025 FFO guidance?")
 
@@ -265,7 +264,6 @@ def test_no_fl_injection_when_chunks_have_guidance_language(monkeypatch) -> None
         supported=1, total=1, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     generator.answer("What is BXP's 2026 FFO guidance?")
 
@@ -301,7 +299,6 @@ def test_no_fl_injection_for_non_forward_looking_query(monkeypatch) -> None:
         supported=1, total=1, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     generator.answer("What was BXP's 2025 FFO?")
 
@@ -338,11 +335,18 @@ def test_ri_dividend_yield_guidance_fires_guard(monkeypatch) -> None:
     sa = _make_sa(prose="Realty Income does not disclose dividend yield guidance.")
 
     captured_system: list[str] = []
+    captured_forward_looking: list[bool] = []
 
     def fake_generate(query, contexts, intent="latest", forward_looking_hint=False, system_prompt_override=None):  # noqa: ANN001
+        captured_forward_looking.append(forward_looking_hint)
         if system_prompt_override is not None:
             captured_system.append(system_prompt_override)
         return sa
+
+    # The guard fires only when retrieval.forward_looking is True (the
+    # classifier signal). Patch retrieve() to return a forward-looking-
+    # flagged result so the guard branch is exercised.
+    retrieval.forward_looking = True
 
     monkeypatch.setattr(generator, "retrieve", lambda q: retrieval)
     monkeypatch.setattr(generator, "_generate_structured", fake_generate)
@@ -350,11 +354,23 @@ def test_ri_dividend_yield_guidance_fires_guard(monkeypatch) -> None:
         supported=0, total=0, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     generator.answer("What is Realty Income's dividend yield guidance?")
 
+    # Guard fired: a system prompt override was applied (i.e. the
+    # FL-absent instruction was appended).
     assert len(captured_system) == 1, "Guard must fire for RI dividend yield guidance query"
+    # And the override actually contains the forward-looking guard text,
+    # not just any non-empty override.
+    injected = captured_system[0].lower()
+    assert (
+        "not disclose" in injected
+        or "not guided" in injected
+        or "forward-looking" in injected
+        or "guidance" in injected
+    ), f"Injected system prompt should contain FL-absent instruction; got: {captured_system[0][:300]}"
+    # The classifier signal was propagated through to the generation call.
+    assert captured_forward_looking == [True]
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +442,6 @@ def test_answer_uses_corpus_aware_prompt_for_generation(monkeypatch) -> None:
         supported=1, total=1, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     generator.answer("What is BXP leverage?")
 
@@ -436,6 +451,84 @@ def test_answer_uses_corpus_aware_prompt_for_generation(monkeypatch) -> None:
     for company in corpus_companies:
         assert company in system_used, \
             f"Corpus company '{company}' must appear in system prompt used for generation"
+
+
+# ---------------------------------------------------------------------------
+# simon-std-1 — Footnote anchor disambiguation in system prompt
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_contains_footnote_anchor_instruction() -> None:
+    """build_system_prompt_with_corpus() must embed the footnote-anchor disambiguation
+    instruction so the Simon p.4 $478/fn.3 vs ICSC/fn.2 trap is caught at generation
+    time regardless of query intent.
+
+    Anchor probe: simon-std-1 — user asks "what does ICSC say about $478 per sq ft"
+    but the chunk attributes $478 to fn.3 (Simon analysis), not fn.2 (ICSC).
+    The instruction must be present unconditionally (not gated on FL intent).
+    """
+    from src.generation.generator import _build_system_prompt_with_corpus
+
+    prompt = _build_system_prompt_with_corpus(["BXP", "Simon Property Group"])
+
+    assert "footnote" in prompt.lower() or "anchor" in prompt.lower(), (
+        "System prompt must contain footnote-anchor disambiguation instruction "
+        f"(probe: simon-std-1); got first 500 chars: {prompt[:500]}"
+    )
+
+
+def test_system_prompt_contains_citation_page_anchoring_instruction() -> None:
+    """The system prompt must embed an explicit "every cited page must match an
+    actually-retrieved excerpt" rule. The instruction has to be unconditional —
+    the failure mode is fabricated page tuples on all-company synthesis queries
+    where the model has the right value but invents a plausible-looking page
+    number that does not match any retrieved chunk.
+
+    Anchor probe: g07 — "Rank all companies by Net Debt to EBITDA" produced an
+    answer whose citation page tuples did not exist in any retrieved chunk.
+    """
+    from src.generation.generator import _build_system_prompt_with_corpus
+
+    prompt = _build_system_prompt_with_corpus(["BXP", "Digital Realty"])
+
+    lowered = prompt.lower()
+    assert "page" in lowered and "retrieved" in lowered, (
+        "System prompt must reference 'page' and 'retrieved' in the page-anchoring "
+        "rule; got first 800 chars: " + prompt[:800]
+    )
+    # The instruction must specifically forbid inferring a page from where the
+    # data 'should' be — the prior failure mode was the model guessing a page
+    # because the figure was correct.
+    assert "should" in lowered or "infer" in lowered or "invent" in lowered, (
+        "System prompt must forbid inferring page numbers; got: " + prompt[:800]
+    )
+
+
+def test_system_prompt_contains_disambiguated_citation_example() -> None:
+    """The SYSTEM_PROMPT must include a worked example showing the disambiguated
+    citation form [Company, Doc Type (Subtype), Month Year, p.N], so the LLM
+    preserves the full doc-type+subtype string instead of collapsing to just
+    the subtype on synthesis-table output.
+
+    Anchor probe: xdoc-adv-7 — the model produced [VICI Properties, Company Update,
+    March 2026, p.7] (collapsed) instead of [VICI Properties, Investor Presentation
+    (Company Update), March 2026, p.7] (full disambiguated form).
+    """
+    from src.generation.generator import _build_system_prompt_with_corpus
+    prompt = _build_system_prompt_with_corpus(["BXP", "VICI Properties"])
+
+    # The example must use the parenthetical subtype form
+    assert "Investor Presentation (Investor Day Session)" in prompt or \
+           "Investor Presentation (Quarterly Investor Deck)" in prompt, (
+        "SYSTEM_PROMPT must show a worked example using the disambiguated "
+        "citation form `[Company, Doc Type (Subtype), Month Year, p.N]`; "
+        f"got prompt head[:800]={prompt[:800]}"
+    )
+    # And must explicitly forbid the collapse-to-subtype behavior
+    assert "abbreviate" in prompt.lower() or "verbatim" in prompt.lower() or "preserve" in prompt.lower(), (
+        "SYSTEM_PROMPT must explicitly instruct not to abbreviate the citation "
+        "to just the subtype; got: " + prompt[:1500]
+    )
 
 
 def test_system_prompt_in_corpus_company_not_found_framing(monkeypatch) -> None:

@@ -417,7 +417,6 @@ def test_generator_wires_retrieval_confidence(monkeypatch) -> None:
         supported=0, total=0, faithfulness_ratio=1.0, unsupported=[], numeric_mismatches=[]
     ))
     monkeypatch.setattr(gen, "check_numeric_consistency", lambda *a, **kw: [])
-    monkeypatch.setattr(gen, "check_ooc_entity_attribution", lambda *a, **kw: [])
 
     answer = gen.answer_structured("What is NOI?")
     assert answer.diagnostics.get("retrieval_confidence") == 0.82

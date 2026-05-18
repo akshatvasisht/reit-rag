@@ -78,11 +78,6 @@ def test_expect_min_companies_in_context_set_on_correct_queries() -> None:
     )
 
 
-def test_expect_no_numerical_attribution_to_equinix_on_g15() -> None:
-    g15 = next(gq for gq in EVALUATION_SET if gq.id == "g15")
-    assert g15.expect_no_numerical_attribution_to == "Equinix"
-
-
 def test_expect_forward_looking_on_g24() -> None:
     g24 = next(gq for gq in EVALUATION_SET if gq.id == "g24")
     assert g24.expect_forward_looking is True
@@ -118,7 +113,6 @@ def _make_answer(abstained: bool, forward_looking: bool) -> Answer:
         intent="latest",
         diagnostics={"top_rerank_score": 0.9, "companies_filter": []},
         citation_report=None,
-        ooc_attribution_issues=[],
         structured=structured,
     )
 
@@ -195,7 +189,6 @@ def test_forward_looking_check_none_when_no_structured_answer() -> None:
         intent="latest",
         diagnostics={"top_rerank_score": 0.9, "companies_filter": []},
         citation_report=None,
-        ooc_attribution_issues=[],
         structured=None,
     )
     result = evaluate._grade(gq, a)

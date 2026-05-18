@@ -44,9 +44,6 @@ class StructuredAnswer:
     # Per-claim numeric consistency issues surfaced after generation; empty list
     # means every cited value was verified in its source chunk.
     numeric_consistency_report: list[dict] = field(default_factory=list)
-    # Out-of-corpus entity attribution issues; empty list means no such pattern
-    # was detected in this answer.
-    ooc_attribution_issues: list[dict] = field(default_factory=list)
     # Number of additional retrieval passes performed beyond the initial one.
     retrieval_hops: int = 0
     # Sub-questions that triggered additional retrieval passes, in order fired.
@@ -99,6 +96,7 @@ class Chunk:
     embedding: Optional[list[float]] = None
     doc_subtype: str = "unknown"  # granular subtype within doc_type; flows from DocumentMeta
     page_content_class: str = "unknown"  # page-level content classification for boilerplate filtering
+    contextualized_text: Optional[str] = None  # Claude-generated chunk context (scripts/contextualize.py); used by reranker as vocab-bridged signal
     id: UUID = field(default_factory=uuid4)
 
     @classmethod
@@ -130,6 +128,7 @@ class Chunk:
             token_count=r.get("token_count"),
             doc_subtype=r.get("doc_subtype", "unknown") or "unknown",
             page_content_class=r.get("page_content_class", "unknown") or "unknown",
+            contextualized_text=r.get("contextualized_text"),
             embedding=None,  # never returned from retrieval queries for efficiency
         )
 

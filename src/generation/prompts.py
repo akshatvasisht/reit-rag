@@ -88,7 +88,7 @@ The only exception: if a chunk is explicitly authored by or primarily about
 the queried company, you may cite it. Incidental mentions in competitor documents
 are NOT reliable sources for the queried company's own figures.
 
-For every factual claim, include an inline citation in this exact format: [Company, Document Type, Month Year, p.N]
+For every factual claim, include an inline citation in this exact format: [Company, Document Type, Month Year, p.N], or when the excerpt's citation attribute carries a parenthetical subtype, [Company, Document Type (Subtype), Month Year, p.N].
 If excerpts contain conflicting values, report each value with attribution. Do not merge conflicting facts into one reconciled figure.
 If the retrieved context does not contain sufficient evidence, respond with:
 "I couldn't find reliable information on this in the provided documents." and list which documents were searched.
@@ -121,12 +121,45 @@ Example (refusal):
 "I couldn't find reliable information on this in the provided documents.
 Documents searched: Digital Realty (Investor Presentation, March 2026); Digital Realty (Investor Presentation, December 2025)."
 
+Example (subtype disambiguation — when two retrieved chunks share company + doc_type + month):
+"BXP's December Investor Day session reports same-store occupancy of 86.4% [BXP, Investor Presentation (Investor Day Session), December 2025, p.79]; the Quarterly Investor Deck for the same month reports 87.1% [BXP, Investor Presentation (Quarterly Investor Deck), December 2025, p.43]. The two figures reflect different as-of dates within the period."
+
+CRITICAL — when the excerpt's citation attribute contains a parenthetical subtype (e.g. `Investor Presentation (Quarterly Investor Deck)`), you MUST preserve the full string verbatim — both the doc-type name AND the parenthetical subtype. Do not abbreviate to just the subtype, even in dense tabular output where space is at a premium. The parser uses the full form to verify the citation against the retrieved chunk.
+
 In all cases, keep answers concise and evidence-first.
 
 If multiple retrieved chunks from the same company contain different values for
 the same metric, you MUST cite ALL of them. Do not silently prefer one.
 Explicitly flag the discrepancy: "Source A reports X [citation]; Source B reports Y [citation].
 These values differ — verify against the source documents."
+
+FOOTNOTE ANCHOR DISAMBIGUATION — MANDATORY:
+When a retrieved chunk contains multiple footnote anchors near a numeric claim
+(superscript digits, "(fn N)" markers, or sentences ending in ², ³, ⁴, etc.),
+the source attribution in your citation MUST match the footnote anchor attached
+to that specific numeric value, not an adjacent footnote's anchor. If a user
+asks "what does source X say about Y" and the chunk shows Y attributed to a
+different footnote source than X, do NOT substitute — state explicitly that the
+deck attributes Y to the actual footnote source, and that X is the source for a
+different adjacent claim.
+Example: if $478 is anchored to fn.3 = "Simon analysis" and fn.2 = "ICSC report"
+covers only the preceding sentence, you MUST NOT attribute $478 to ICSC even if
+the query asks what ICSC says — instead say: "The deck attributes $478 to Simon
+analysis (fn.3); the ICSC citation (fn.2) covers a different adjacent claim."
+
+CITATION PAGE ANCHORING — MANDATORY:
+Every page number you cite (the p.N segment of an inline citation) MUST be the
+page number printed in the citation attribute of an actual retrieved excerpt.
+Do NOT infer the "right" page from where the figure "should" appear in a deck;
+do NOT round to a nearby page; do NOT carry a page over from one company's
+chunk into a sibling company's claim. If a figure appears in your evidence but
+you cannot match it to a specific retrieved excerpt's citation header, attribute
+it to the closest excerpt whose chunk text actually contains the figure and use
+that excerpt's exact page. If no retrieved excerpt contains the figure, you do
+not have evidence — soft-refuse for that figure ("the retrieved chunks for
+[Company] do not surface this metric") and list the pages you did retrieve.
+This rule is especially important on cross-company synthesis queries where it
+is tempting to invent a page tuple for every row in a ranking table.
 
 Use the submit_answer tool to return your response. Populate all fields:
 - answer_prose: Write the full answer as readable prose. Assemble it from your claims.
@@ -311,6 +344,27 @@ def build_user_message(
 ABSTENTION_TEMPLATE = (
     "I couldn't find reliable information on this in the provided documents.\n\n"
     "Documents searched: {docs}"
+)
+
+
+# Instruction embedded unconditionally in the base system prompt to prevent
+# footnote-attribution substitution when multiple footnote anchors appear in the
+# same retrieved chunk (anchor case: Simon p.4 — $478 / fn.3 = "Simon analysis"
+# adjacent to fn.2 = "ICSC" covering a different claim).
+_FOOTNOTE_ANCHOR_INSTRUCTION = (
+    "FOOTNOTE ANCHOR DISAMBIGUATION — MANDATORY:\n"
+    "When a retrieved chunk contains multiple footnote anchors near a numeric claim\n"
+    "(superscript digits, \"(fn N)\" markers, or sentences ending in ², ³, ⁴, etc.),\n"
+    "the source attribution in your citation MUST match the footnote anchor attached\n"
+    "to that specific numeric value, not an adjacent footnote's anchor. If a user\n"
+    "asks \"what does source X say about Y\" and the chunk shows Y attributed to a\n"
+    "different footnote source than X, do NOT substitute — state explicitly that the\n"
+    "deck attributes Y to the actual footnote source, and that X is the source for a\n"
+    "different adjacent claim.\n"
+    "Example: if $478 is anchored to fn.3 = \"Simon analysis\" and fn.2 = \"ICSC report\"\n"
+    "covers only the preceding sentence, you MUST NOT attribute $478 to ICSC even if\n"
+    "the query asks what ICSC says — instead say: \"The deck attributes $478 to Simon\n"
+    "analysis (fn.3); the ICSC citation (fn.2) covers a different adjacent claim.\""
 )
 
 

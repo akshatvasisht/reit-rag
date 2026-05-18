@@ -129,6 +129,33 @@ def test_adaptive_retrieve_end_turn_no_hop() -> None:
     assert {rc.chunk.id for rc in result.contexts} == {rc.chunk.id for rc in initial.contexts}
 
 
+@pytest.mark.parametrize("fl", [True, False])
+def test_adaptive_retrieve_preserves_forward_looking(fl: bool) -> None:
+    """merged_result must carry initial_result.forward_looking through the adaptive
+    rebuild. Without this propagation, forward-looking-classified queries would
+    silently lose their FL signal on the adaptive multi-hop path and the
+    forward-looking guard inside the generator would never fire there."""
+    initial = RetrievalResult(
+        query="What is BXP's 2026 FFO guidance?",
+        intent="historical",  # type: ignore[arg-type]
+        contexts=[_make_rc(_make_chunk())],
+        companies=["BXP"],
+        abstain=False,
+        diagnostics={"top_rerank_score": 2.0},
+        forward_looking=fl,
+    )
+    conn = MagicMock()
+    mock_client = _make_mock_client([_make_end_turn_response()])
+
+    with patch("src.retrieval.adaptive._get_haiku_client", return_value=mock_client):
+        result, _ = adaptive_retrieve(initial.query, initial, conn)
+
+    assert result.forward_looking is fl, (
+        f"adaptive_retrieve dropped forward_looking; "
+        f"expected {fl}, got {result.forward_looking}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # adaptive_retrieve: one tool_use then end_turn → one hop, merged dedupe
 # ---------------------------------------------------------------------------
@@ -417,7 +444,6 @@ def test_answer_structured_populates_hop_diagnostics(monkeypatch) -> None:
         supported=0, total=0, faithfulness_ratio=1.0, unsupported=[], numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda s, c: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda s, q, cc: [])
 
     generator.answer_structured("multi-hop test query")
 

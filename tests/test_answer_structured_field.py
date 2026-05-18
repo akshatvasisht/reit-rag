@@ -105,7 +105,6 @@ def test_answer_attaches_structured_on_answered_path() -> None:
         patch("src.generation.generator._generate_structured", return_value=sa),
         patch("src.generation.generator.check_citations") as mock_cit,
         patch("src.generation.generator.check_numeric_consistency", return_value=[]),
-        patch("src.generation.generator.check_ooc_entity_attribution", return_value=[]),
     ):
         mock_cit.return_value = MagicMock(supported=1, total=1, faithfulness_ratio=1.0, numeric_mismatches=[])
         result = answer("What is TestCo guidance?")
@@ -123,7 +122,6 @@ def test_answer_structured_attaches_structured_on_answered_path() -> None:
         patch("src.generation.generator._generate_structured", return_value=sa),
         patch("src.generation.generator.check_citations") as mock_cit,
         patch("src.generation.generator.check_numeric_consistency", return_value=[]),
-        patch("src.generation.generator.check_ooc_entity_attribution", return_value=[]),
     ):
         mock_cit.return_value = MagicMock(supported=1, total=1, faithfulness_ratio=1.0, numeric_mismatches=[])
         result = answer_structured("What is TestCo leverage?")
@@ -165,7 +163,6 @@ def test_answer_answered_carries_retrieval_confidence() -> None:
         patch("src.generation.generator._generate_structured", return_value=sa),
         patch("src.generation.generator.check_citations") as mock_cit,
         patch("src.generation.generator.check_numeric_consistency", return_value=[]),
-        patch("src.generation.generator.check_ooc_entity_attribution", return_value=[]),
     ):
         mock_cit.return_value = MagicMock(supported=1, total=1, faithfulness_ratio=1.0, numeric_mismatches=[])
         result = answer("TestCo leverage?")

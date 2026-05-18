@@ -13,6 +13,8 @@ Agent-facing rules for this repository. Keep this file short and essential.
 - **Citations:** preserve citation-grounded generation flow; do not switch to uncited answer paths.
 - **Failure behavior:** refusal on insufficient evidence is valid behavior; do not replace it with speculative synthesis.
 - **Chart handling:** chart-derived extraction remains additive (`content_type="chart_description"`), not a replacement for base ingestion chunks.
+- **Contextualization path:** `scripts/contextualize.py` is Batch API-based; keep docs and implementation wording consistent with that path.
+- **Generation checks:** runtime post-generation checks are citation + numeric consistency; corpus-membership protection is prompt-level framing.
 
 ## Editing Discipline
 

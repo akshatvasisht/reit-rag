@@ -250,11 +250,19 @@ def test_boilerplate_filter_allows_null() -> None:
     assert "IS NULL" in _BOILERPLATE_FILTER
 
 
-def test_bm25_sql_uses_coalesce_tsv() -> None:
-    """BM25 queries should use COALESCE(contextualized_text_tsv, chunk_text_tsv)."""
+def test_bm25_sql_searches_both_tsvectors() -> None:
+    """BM25 queries must search the union of chunk_text_tsv and the
+    contextualized_text_tsv so entities present in only the original chunk
+    text (and dropped by an imperfect contextualizing summary) remain
+    reachable. The previous COALESCE-prefer-context form silently lost
+    entities like 'Equinix' that the contextualizing pass omitted."""
     for sql in (_BM25_SQL, _BM25_SQL_FILTERED, _BM25_SQL_CT, _BM25_SQL_FILTERED_CT):
-        assert "COALESCE(contextualized_text_tsv, chunk_text_tsv)" in sql, (
-            f"BM25 query not using COALESCE tsv fallback:\n{sql}"
+        assert "chunk_text_tsv || COALESCE(contextualized_text_tsv" in sql, (
+            f"BM25 query must concatenate both tsvectors so entities only "
+            f"in chunk_text are searchable:\n{sql}"
+        )
+        assert "COALESCE(contextualized_text_tsv, chunk_text_tsv)" not in sql, (
+            f"Prior prefer-context COALESCE must be replaced:\n{sql}"
         )
 
 
