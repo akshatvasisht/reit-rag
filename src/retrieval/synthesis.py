@@ -123,6 +123,7 @@ def retrieve_all_company_synthesis(
         MAX_SYNTHESIS_CONTEXT_CHUNKS,
         RetrievalResult,
         _apply_post_rerank_pipeline,
+        enforce_per_issuer_floor,
     )
 
     per_company_top_k = rerank_top_n if rerank_top_n is not None else 3
@@ -131,6 +132,8 @@ def retrieve_all_company_synthesis(
     corpus_companies = sorted({e["company"] for e in CORPUS_REGISTRY})
     all_chunks: list[RetrievedChunk] = []
     per_company_diagnostics: dict[str, dict] = {}
+    # Retain the per-company candidate lists for the per-issuer floor step.
+    candidates_by_company: dict[str, list[RetrievedChunk]] = {}
 
     for company in corpus_companies:
         company_result = _retrieve_single_company(
@@ -141,6 +144,7 @@ def retrieve_all_company_synthesis(
             "chunks_found": len(company_result.contexts),
         }
         all_chunks.extend(company_result.contexts)
+        candidates_by_company[company] = list(company_result.contexts)
 
     # Deduplicate by chunk PK: a chunk mentioning multiple companies in a peer
     # table would otherwise appear once per company sub-query.
@@ -156,6 +160,17 @@ def retrieve_all_company_synthesis(
         for d in per_company_diagnostics.values()
         if d["chunks_found"] > 0
     )
+
+    # Per-issuer floor: for synthesis queries, ensure every corpus company that
+    # produced at least one candidate is represented in the final retained set.
+    # Prevents top-N budget collapse to a single issuer when one company's
+    # peer-comparison tables outscore everyone else's chunks globally.
+    if any_above_threshold:
+        deduped = enforce_per_issuer_floor(
+            deduped,
+            companies=corpus_companies,
+            candidates_by_company=candidates_by_company,
+        )
 
     # For the synthesis path the cross-company score gap is not meaningful
     # (each company was retrieved independently), so confidence is the mean

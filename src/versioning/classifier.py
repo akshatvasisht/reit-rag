@@ -350,6 +350,26 @@ def _llm_classify_intent(query: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Forward-looking detection (used by classify_intent_full)
+# ---------------------------------------------------------------------------
+
+# Conservative set of keywords indicating a forward-looking query. Must stay
+# in sync with the equivalent pattern in src/generation/generator.py.
+_FORWARD_LOOKING_QUERY_RE = re.compile(
+    r"\b("
+    r"guidance|guided|guide|"
+    r"target|targets|"
+    r"outlook|"
+    r"projection|projections|projected|"
+    r"forecast|forecasted|"
+    r"expected\s+(?:to|for)|"
+    r"forward[-\s]looking"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -397,3 +417,24 @@ def classify_intent(query: str) -> TemporalIntent:
             query, fallback, "regex_error_fallback", error=str(e)
         )
         return fallback
+
+
+def classify_intent_full(query: str) -> tuple[TemporalIntent, bool]:
+    """Classify temporal intent AND detect whether the query asks for forward-looking data.
+
+    Combines ``classify_intent`` with a lightweight forward-looking keyword
+    check so callers do not need to duplicate the regex. Both signals are
+    derived in a single call to avoid redundant LLM invocations.
+
+    Args:
+        query: The raw user query string.
+
+    Returns:
+        A 2-tuple ``(intent, forward_looking)`` where ``intent`` is the same
+        value as ``classify_intent(query)`` and ``forward_looking`` is True
+        when the query contains guidance / target / outlook / projection /
+        forecast or similar forward-looking vocabulary.
+    """
+    intent = classify_intent(query)
+    forward_looking = bool(_FORWARD_LOOKING_QUERY_RE.search(query))
+    return intent, forward_looking

@@ -142,3 +142,11 @@ class RetrievedChunk:
     vector_rank: Optional[int] = None
     fused_score: Optional[float] = None
     rerank_score: Optional[float] = None
+    # Provenance fields (2g) — indicate how this chunk arrived in the context.
+    # Values: "reranked" | "parent_expanded" | "sibling_expanded" |
+    #         "conflict_injected" | "table_pair_expanded"
+    retrieval_stage: Optional[str] = None
+    # ID (as str) of the chunk that triggered this expansion, when applicable.
+    trigger_chunk_id: Optional[str] = None
+    # Human-readable description of why this chunk was included.
+    expansion_reason: Optional[str] = None
