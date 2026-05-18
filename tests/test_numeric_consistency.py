@@ -243,7 +243,7 @@ def test_single_value_within_chunk_range_accepted() -> None:
 
 
 def test_composite_semicolon_separated_values_match() -> None:
-    """'~89% end of 2026; 87.25%–88% average' — semicolon split, atoms in chunk."""
+    """'~89% end of 2026; 87.25%–88% average' - semicolon split, atoms in chunk."""
     chunk = _make_chunk(chunk_text="Leased 89% at end of 2026, average 87.25%-88%.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("BXP occupancy.", value="~89% end of 2026; 87.25%–88% average")

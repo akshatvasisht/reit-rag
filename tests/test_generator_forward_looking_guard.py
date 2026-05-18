@@ -151,7 +151,7 @@ def test_detect_forward_looking_intent_negative_occupancy_query() -> None:
 def test_chunks_support_guidance_language_present() -> None:
     """Chunk with 'guidance' token must return True."""
     from src.generation.generator import _chunks_have_forward_looking_support
-    chunks = [_make_chunk(text="Management guided 2026 FFO of $7.10–$7.30 per share.")]
+    chunks = [_make_chunk(text="Management guided 2026 FFO of $7.10-$7.30 per share.")]
     assert _chunks_have_forward_looking_support(chunks) is True
 
 
@@ -163,7 +163,7 @@ def test_chunks_support_expect_language_present() -> None:
 
 def test_chunks_support_target_language_present() -> None:
     from src.generation.generator import _chunks_have_forward_looking_support
-    chunks = [_make_chunk(text="Our target range for 2026 FFO is $7.00–$7.50.")]
+    chunks = [_make_chunk(text="Our target range for 2026 FFO is $7.00-$7.50.")]
     assert _chunks_have_forward_looking_support(chunks) is True
 
 
@@ -335,11 +335,18 @@ def test_ri_dividend_yield_guidance_fires_guard(monkeypatch) -> None:
     sa = _make_sa(prose="Realty Income does not disclose dividend yield guidance.")
 
     captured_system: list[str] = []
+    captured_forward_looking: list[bool] = []
 
     def fake_generate(query, contexts, intent="latest", forward_looking_hint=False, system_prompt_override=None):  # noqa: ANN001
+        captured_forward_looking.append(forward_looking_hint)
         if system_prompt_override is not None:
             captured_system.append(system_prompt_override)
         return sa
+
+    # The guard fires only when retrieval.forward_looking is True (the
+    # classifier signal). Patch retrieve() to return a forward-looking-
+    # flagged result so the guard branch is exercised.
+    retrieval.forward_looking = True
 
     monkeypatch.setattr(generator, "retrieve", lambda q: retrieval)
     monkeypatch.setattr(generator, "_generate_structured", fake_generate)
@@ -350,7 +357,20 @@ def test_ri_dividend_yield_guidance_fires_guard(monkeypatch) -> None:
 
     generator.answer("What is Realty Income's dividend yield guidance?")
 
+    # Guard fired: a system prompt override was applied (i.e. the
+    # FL-absent instruction was appended).
     assert len(captured_system) == 1, "Guard must fire for RI dividend yield guidance query"
+    # And the override actually contains the forward-looking guard text,
+    # not just any non-empty override.
+    injected = captured_system[0].lower()
+    assert (
+        "not disclose" in injected
+        or "not guided" in injected
+        or "forward-looking" in injected
+        or "guidance" in injected
+    ), f"Injected system prompt should contain FL-absent instruction; got: {captured_system[0][:300]}"
+    # The classifier signal was propagated through to the generation call.
+    assert captured_forward_looking == [True]
 
 
 # ---------------------------------------------------------------------------

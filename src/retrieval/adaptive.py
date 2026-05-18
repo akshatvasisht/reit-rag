@@ -348,5 +348,6 @@ def adaptive_retrieve(
         abstain_reason=initial_result.abstain_reason,
         retrieval_confidence=initial_result.retrieval_confidence,
         diagnostics=dict(initial_result.diagnostics),
+        forward_looking=initial_result.forward_looking,
     )
     return merged_result, sub_queries

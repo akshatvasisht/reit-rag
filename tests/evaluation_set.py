@@ -92,6 +92,7 @@ EVALUATION_SET: list[EvaluationQuery] = [
         query="How did DLR's leverage change between December 2025 and March 2026?",
         category="version_comparison",
         expected_intent="comparison",
+        expected_intent_strict=True,
         expected_company="Digital Realty",
         expect_both_dlr_versions=True,
         human_eval_rubric=(
@@ -265,6 +266,7 @@ EVALUATION_SET: list[EvaluationQuery] = [
         query="Are there conflicting data points across documents on Digital Realty leverage?",
         category="conflict_detection",
         expected_intent="conflict",
+        expected_intent_strict=True,
         expected_company="Digital Realty",
         expect_both_dlr_versions=True,
         human_eval_rubric=(
@@ -292,13 +294,20 @@ EVALUATION_SET: list[EvaluationQuery] = [
         category="metric_precision",
         expected_intent="latest",
         expected_company="Realty Income",
-        expect_soft_refusal=True,
         human_eval_rubric=(
-            "Answer must report both FFO and AFFO per share values and name the "
-            "specific line-item adjustments (e.g. straight-line rent, acquisition costs) "
-            "that reconcile them. Soft refusal is acceptable if the deck omits one metric."
+            "Realty Income's investor deck contains the full FFO/AFFO "
+            "reconciliation at p.40 — Normalized FFO to common stockholders, "
+            "Diluted AFFO, and Diluted AFFO per share ($4.28 for FY 2025) are "
+            "all disclosed alongside the adjusting items. A correct answer "
+            "reports both per-share figures and names the line-item "
+            "adjustments that reconcile them (e.g. straight-line rent, "
+            "acquisition costs, share-based comp)."
         ),
-        notes="Soft refusal is acceptable if FFO/AFFO reconciliation is absent from corpus.",
+        notes=(
+            "Calibration: prior version expected soft_refusal, but the deck "
+            "explicitly publishes the reconciliation. A substantive answer "
+            "with both metrics + adjustments is the correct behavior."
+        ),
     ),
     EvaluationQuery(
         id="g19",
@@ -321,20 +330,27 @@ EVALUATION_SET: list[EvaluationQuery] = [
     EvaluationQuery(
         id="g20",
         query="How has BXP's occupancy rate trended over the reported quarters in the Investor Day deck?",
-        category="abstention_oo_corpus",
+        category="metric_precision",
         expected_intent="historical",
         expected_company="BXP",
-        expect_hard_abstain=True,
+        expect_soft_refusal=True,
         human_eval_rubric=(
-            "Must abstain. The BXP 2025 Investor Day deck contains occupancy data for "
-            "Q2 2025 (86.4% on p.79) and a projected year-end 2026 figure (89.0%), but "
-            "no multi-quarter historical occupancy rate series across consecutive quarters."
+            "BXP Morning Session p.18 reports the Q2 2020 -> Q2 2025 "
+            "occupancy trend (CBD 95.2% -> 89.9%, Δ-5.3pp; Suburban "
+            "85.8% -> 70.9%, Δ-14.9pp). p.79 adds the Q2 2025 (86.4%) "
+            "snapshot and the projected YE 2026 occupancy (89.0%). A "
+            "correct answer reports the disclosed endpoint trend and "
+            "names the granularity available (period-endpoint comparison "
+            "rather than a quarterly series). A soft-refusal that frames "
+            "the granularity limit is also acceptable."
         ),
         notes=(
-            "Verified BXP Morning Session Deck p.79 shows Q2 2025 occupancy of 86.4% "
-            "and projected year-end 2026 occupancy of 89.0%, but no quarterly series "
-            "of reported occupancy rates is present; single-point data does not satisfy "
-            "the trend query."
+            "Calibration: prior version expected hard_abstain because the "
+            "deck lacks a strictly consecutive-quarter series, but the "
+            "five-year endpoint comparison with a projected end-point IS "
+            "a disclosed trend. Verified against BXP Morning Session p.18 "
+            "and p.79. expect_soft_refusal accepts either a substantive "
+            "answer or a granularity-framed refusal."
         ),
     ),
     EvaluationQuery(
@@ -445,6 +461,7 @@ EVALUATION_SET: list[EvaluationQuery] = [
         query="Compare BXP's portfolio occupancy as reported in the December 2025 Investor Day session versus the Q4 2025 quarterly investor deck.",
         category="version_comparison",
         expected_intent="comparison",
+        expected_intent_strict=True,
         expected_company="BXP",
         human_eval_rubric=(
             "Both decks carry BXP occupancy figures. Citations MUST distinguish "

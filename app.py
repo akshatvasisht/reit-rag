@@ -49,22 +49,22 @@ def _confidence_label(retrieval_confidence: float, abstained: bool) -> str:
 def _rerank_label(rerank_score: float | None) -> str:
     """Return a human-readable rerank score label for a retrieved chunk.
 
-    Chunks injected via parent expansion, sibling expansion, or conflict
-    injection are not passed through the cross-encoder and therefore have
-    no rerank score. Displaying a bare "—" for these is confusing; this
-    helper replaces it with an explanatory label so the reviewer knows the
-    chunk was included for structural context rather than ranked relevance.
+    Chunks injected via downstream pipeline stages (parent expansion, sibling
+    expansion, table-pair expansion, conflict injection, per-issuer floor)
+    do not pass through the cross-encoder and have no rerank score. The
+    label below avoids enumerating an incomplete set of stage names — that
+    enumeration drifts whenever a new stage is added.
 
     Args:
-        rerank_score: The cross-encoder rerank score, or None for expanded
-            chunks that bypassed the reranker.
+        rerank_score: The cross-encoder rerank score, or None for chunks
+            that bypassed the reranker.
 
     Returns:
         A formatted score string (e.g. "1.23") for scored chunks, or a
-        descriptive label for unscored expanded context chunks.
+        generic descriptive label for unscored expanded context chunks.
     """
     if rerank_score is None:
-        return "unscored expanded context (parent/sibling/conflict)"
+        return "unscored expanded context"
     return f"{rerank_score:.2f}"
 
 
@@ -135,14 +135,25 @@ def _warm_models() -> None:
 
 
 @st.cache_resource(show_spinner=False)
-def _startup_checks() -> None:
-    """Run app-entrypoint checks that require the DB; invoked once per process."""
-    from src.retrieval.pipeline import check_contextual_activation
-    check_contextual_activation()
+def _startup_checks() -> str | None:
+    """Run app-entrypoint checks that require the DB; invoked once per process.
+
+    Returns None on success or a short user-facing error message on failure.
+    Wrapped in a try/except so an unexpected import or DB error does not
+    abort the Streamlit page render — the UI surfaces the message instead.
+    """
+    try:
+        from src.retrieval.pipeline import check_contextual_activation
+        check_contextual_activation()
+        return None
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"
 
 
 _warm_models()
-_startup_checks()
+_startup_error = _startup_checks()
+if _startup_error:
+    st.warning(f"Startup check reported a non-fatal issue: {_startup_error}")
 
 
 st.title("Corporate RAG for REIT Investor Presentations")

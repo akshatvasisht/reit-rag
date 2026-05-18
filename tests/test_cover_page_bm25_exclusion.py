@@ -52,13 +52,14 @@ def test_filter_uses_not_in():
 
 def test_substantive_not_in_filter():
     """substantive must NOT appear in the exclusion list."""
-    # The filter is a NOT IN list; 'substantive' should not be one of its members.
-    # Simple check: substantive should not appear inside the NOT IN (...) clause.
     import re
-    # Extract the contents of the NOT IN (...) clause.
     m = re.search(r"NOT IN \(([^)]+)\)", _BOILERPLATE_FILTER, re.IGNORECASE)
-    if m:
-        excluded = m.group(1)
-        assert "substantive" not in excluded, (
-            "'substantive' should not be in the exclusion list"
-        )
+    assert m is not None, (
+        f"Expected a NOT IN (...) clause in _BOILERPLATE_FILTER but found "
+        f"none — the test was vacuously passing before this guard was added:\n"
+        f"{_BOILERPLATE_FILTER}"
+    )
+    excluded = m.group(1)
+    assert "substantive" not in excluded, (
+        "'substantive' should not be in the exclusion list"
+    )

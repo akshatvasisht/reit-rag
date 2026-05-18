@@ -24,7 +24,13 @@ def _install_streamlit_stub() -> None:
     st = types.ModuleType("streamlit")
 
     # --- Decorator stubs ---
-    def _cache_resource(**kw):
+    # Streamlit's @st.cache_resource is used both bare (decorates the
+    # function directly) and parameterized (@st.cache_resource(...)).
+    # Support both forms so a future shift between the two doesn't
+    # break this test harness silently.
+    def _cache_resource(*args, **kw):
+        if len(args) == 1 and callable(args[0]) and not kw:
+            return args[0]
         return lambda f: f
 
     st.cache_resource = _cache_resource  # type: ignore[attr-defined]

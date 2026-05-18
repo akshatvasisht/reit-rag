@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -173,8 +174,10 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
             forward_looking_check = None
 
     # Soft-refusal check: when expect_soft_refusal=True the answer must either
-    # abstain or contain recognised soft-refusal language.  An answer that
-    # provides substantive content when a refusal is expected is a hard fail.
+    # abstain or be PRIMARILY refusal language. An answer that includes a
+    # refusal phrase as a hedge over otherwise substantive content does not
+    # count — stripping the refusal phrases must leave essentially no
+    # remaining substance.
     soft_refusal_check = None
     if gq.expect_soft_refusal:
         _soft_refusal_phrases = (
@@ -187,9 +190,24 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
             "no information",
             "not available",
         )
-        text_lower = a.text.lower()
-        _text_has_refusal = any(p in text_lower for p in _soft_refusal_phrases)
-        soft_refusal_check = bool(a.abstained) or _text_has_refusal
+        if a.abstained:
+            soft_refusal_check = True
+        else:
+            text_lower = a.text.lower()
+            has_refusal_phrase = any(p in text_lower for p in _soft_refusal_phrases)
+            if not has_refusal_phrase:
+                soft_refusal_check = False
+            else:
+                # Strip refusal phrases and surrounding punctuation; the
+                # remaining alphanumeric content must be small enough to
+                # represent only scaffolding ("the information is", "in the
+                # source documents") rather than substantive claims that
+                # happen to embed a refusal phrase as a hedge.
+                text_norm = re.sub(r"[^a-z0-9\s]", " ", text_lower)
+                for phrase in _soft_refusal_phrases:
+                    text_norm = text_norm.replace(phrase, " ")
+                remaining_alnum = re.sub(r"\s+", "", text_norm)
+                soft_refusal_check = len(remaining_alnum) <= 50
 
     # Aggregate pass/fail.
     reasons_pass: list[str] = []

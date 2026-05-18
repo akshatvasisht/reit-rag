@@ -337,10 +337,10 @@ def answer_structured(query: str) -> Answer:
     corpus_companies = sorted({e["company"] for e in CORPUS_REGISTRY})
     system_prompt = _build_system_prompt_with_corpus(corpus_companies)
 
-    if _is_forward_looking_query(query) and not _chunks_have_forward_looking_support(contexts_sorted):
+    if retrieval.forward_looking and not _chunks_have_forward_looking_support(contexts_sorted):
         logger.info(
-            "Forward-looking guard fired (answer_structured): "
-            "query has FL intent but no FL language in chunks"
+            "Forward-looking guard fired: classifier marked the query as "
+            "forward-looking but no retrieved chunk carries FL language"
         )
         system_prompt = system_prompt + _FL_ABSENT_INSTRUCTION
 
