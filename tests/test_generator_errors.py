@@ -67,3 +67,45 @@ def test_answer_structured_returns_controlled_error_on_generation_failure(monkey
     assert result.abstained is True
     assert "temporary model/API issue" in result.text
     assert result.diagnostics.get("generation_error") == "APIConnectionError"
+
+
+class _UnexpectedBugMessages:
+    def create(self, **kwargs):  # noqa: ANN003
+        raise RuntimeError("simulated internal defect, not a transient API failure")
+
+
+class _UnexpectedBugClient:
+    def __init__(self) -> None:
+        self.messages = _UnexpectedBugMessages()
+
+
+def test_unexpected_internal_error_propagates_not_silently_abstains(monkeypatch) -> None:
+    """A RuntimeError inside generation is not a transient API failure and
+    must reach the operator instead of being mapped to an abstain stub."""
+    import pytest
+
+    monkeypatch.setattr(generator, "retrieve", lambda query: _mk_retrieval())
+    monkeypatch.setattr(generator, "_get_client", lambda: _UnexpectedBugClient())
+
+    with pytest.raises(RuntimeError, match="simulated internal defect"):
+        generator.answer("What is DLR leverage?")
+
+
+def test_typeerror_propagates_rather_than_masquerading_as_abstain(monkeypatch) -> None:
+    """TypeError used to be on the transient list, which silently masked
+    real bugs in dataclass construction or signature mismatches."""
+    import pytest
+
+    class _TypeErrorMessages:
+        def create(self, **kwargs):  # noqa: ANN003
+            raise TypeError("unexpected keyword argument 'foo' from SDK drift or call-site bug")
+
+    class _TypeErrorClient:
+        def __init__(self) -> None:
+            self.messages = _TypeErrorMessages()
+
+    monkeypatch.setattr(generator, "retrieve", lambda query: _mk_retrieval())
+    monkeypatch.setattr(generator, "_get_client", lambda: _TypeErrorClient())
+
+    with pytest.raises(TypeError):
+        generator.answer_structured("What is DLR leverage?")

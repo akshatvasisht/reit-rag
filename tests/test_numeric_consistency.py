@@ -467,3 +467,66 @@ def test_chk8_dollar_thousands_annotation_stripped() -> None:
     claim = _make_claim("Rental revenues were $28,183 thousand.", value="$28,183 thousand")
     issues = check_numeric_consistency(_make_answer([claim]), contexts)
     assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Wrong-chunk-class detection — section-header / narrative chunks cited for
+# numeric claims when the chunk has zero financial values at all.
+# ---------------------------------------------------------------------------
+
+
+def test_section_header_chunk_emits_wrong_chunk_issue() -> None:
+    """A financial-numeric claim cited against a chunk whose text contains no
+    financial values at all (e.g. a section-title or narrative paragraph)
+    must produce a stronger issue type than a regular numeric mismatch."""
+    chunk = _make_chunk(chunk_text="Capital Structure\nOverview of leverage policy and targets")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Net debt to EBITDA was 4.9x.", value="4.9x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1
+    issue = issues[0]
+    assert issue["type"] == "wrong_chunk_no_financial_values"
+    assert issue["claimed_value"] == "4.9x"
+    assert issue["chunk_values_found"] == []
+
+
+def test_narrative_chunk_with_no_values_emits_wrong_chunk_issue() -> None:
+    """Pure narrative without any financial figures — same wrong-chunk class."""
+    chunk = _make_chunk(
+        chunk_text=(
+            "Our balance-sheet strategy emphasizes prudent capital allocation, "
+            "match-funding of acquisitions, and consistent investment-grade ratings."
+        )
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Leverage was reported at 8.18x as of Q2 2025.", value="8.18x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1
+    assert issues[0]["type"] == "wrong_chunk_no_financial_values"
+
+
+def test_non_financial_unit_claim_stays_as_regular_mismatch() -> None:
+    """When the failing atom is a non-financial unit (kW, sq ft, years), the
+    wrong-chunk classification does not apply — the substring path handles
+    these and the issue type remains the standard mismatch."""
+    chunk = _make_chunk(chunk_text="Power-density configurations vary by site.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Average rack density was 16.8 kW.", value="16.8 kW")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1
+    # The chunk text doesn't contain "16.8 kW" so substring fails, but the
+    # claim is non-financial-unit so it stays as a regular numeric_mismatch.
+    assert issues[0]["type"] == "numeric_mismatch"
+
+
+def test_chunk_with_unrelated_financial_value_stays_as_regular_mismatch() -> None:
+    """A chunk that DOES extract a financial value (just not the right one)
+    must remain a regular numeric_mismatch — the stronger wrong-chunk class
+    only applies when the chunk has zero financial values at all."""
+    chunk = _make_chunk(chunk_text="Revenue grew 12% year-over-year.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Revenue grew 25%.", value="25%")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1
+    assert issues[0]["type"] == "numeric_mismatch"
+    assert "12%" in issues[0]["chunk_values_found"]

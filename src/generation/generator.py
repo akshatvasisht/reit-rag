@@ -53,9 +53,12 @@ _client: Anthropic | None = None
 
 # Errors that indicate a transient API-layer failure and should trigger the
 # controlled error path rather than propagating an unhandled exception.
-# TypeError is included so that SDK version mismatches (unexpected kwargs, etc.)
-# degrade gracefully instead of crashing the user request.
-_GENERATION_ERRORS = (APIConnectionError, APITimeoutError, APIStatusError, RateLimitError, TypeError)
+# Scope is intentionally narrow: only transient network/API conditions and
+# rate-limiting. Other exception classes (TypeError from a dataclass
+# construction bug, KeyError from a malformed tool-use payload, etc.)
+# propagate so operators can distinguish a transient outage from a code
+# defect — both used to produce identical abstain-shaped output.
+_GENERATION_ERRORS = (APIConnectionError, APITimeoutError, APIStatusError, RateLimitError)
 
 # Tool definition that instructs the model to return its answer as a structured
 # object matching ANSWER_JSON_SCHEMA.  Tool-use is used in place of a native
@@ -226,94 +229,14 @@ class Answer:
 
 
 def answer(query: str) -> Answer:
-    """Retrieve, optionally abstain, otherwise generate a cited answer."""
-    retrieval = retrieve(query)
+    """Retrieve, optionally abstain, otherwise generate a cited answer.
 
-    if retrieval.abstain or not retrieval.contexts:
-        logger.info("Abstaining: %s", retrieval.abstain_reason or "no contexts")
-        abstain_diagnostics = dict(retrieval.diagnostics) if retrieval.diagnostics else {}
-        abstain_diagnostics["retrieval_confidence"] = retrieval.retrieval_confidence
-        return Answer(
-            query=query,
-            text=render_abstention(retrieval.contexts),
-            abstained=True,
-            contexts=retrieval.contexts,
-            intent=retrieval.intent,
-            diagnostics=abstain_diagnostics,
-        )
-
-    # Sort contexts by document coordinates before prompt assembly so that
-    # floating-point score ties in reranker output don't produce different
-    # orderings across runs.  The original list is kept for diagnostic display.
-    contexts_sorted = sorted(
-        retrieval.contexts,
-        key=lambda c: (c.chunk.company, c.chunk.report_date, c.chunk.page_number or 0),
-    )
-
-    from src.corpus_registry import CORPUS_REGISTRY  # noqa: PLC0415
-    corpus_companies = sorted({e["company"] for e in CORPUS_REGISTRY})
-    system_prompt = _build_system_prompt_with_corpus(corpus_companies)
-
-    # When the query is forward-looking and no retrieved chunk carries
-    # forward-looking language, force a soft-refusal/caveat instead of
-    # letting a reported actual be presented as guidance.
-    if _is_forward_looking_query(query) and not _chunks_have_forward_looking_support(contexts_sorted):
-        logger.info(
-            "Forward-looking guard fired: query has FL intent but no FL language in chunks"
-        )
-        system_prompt = system_prompt + _FL_ABSENT_INSTRUCTION
-
-    try:
-        structured = _generate_structured(
-            query, contexts_sorted,
-            intent=retrieval.intent,
-            forward_looking_hint=retrieval.forward_looking,
-            system_prompt_override=system_prompt,
-        )
-    except _GENERATION_ERRORS as e:
-        logger.exception("Generation call failed: %s", type(e).__name__)
-        diagnostics = dict(retrieval.diagnostics)
-        diagnostics["generation_error"] = type(e).__name__
-        diagnostics["retrieval_confidence"] = retrieval.retrieval_confidence
-        return Answer(
-            query=query,
-            text=_render_generation_error(retrieval.contexts),
-            abstained=True,
-            contexts=retrieval.contexts,
-            intent=retrieval.intent,
-            diagnostics=diagnostics,
-        )
-
-    text = structured.answer_prose
-    report = check_citations(text, retrieval.contexts)
-    logger.info("Citation faithfulness: %d/%d supported (%.0f%%)",
-                report.supported, report.total, report.faithfulness_ratio * 100)
-
-    numeric_issues: list[dict] = []
-    if not structured.abstain:
-        numeric_issues = check_numeric_consistency(structured, retrieval.contexts)
-        if numeric_issues:
-            logger.info("Numeric consistency issues: %d", len(numeric_issues))
-    report.numeric_mismatches = numeric_issues
-    structured.numeric_consistency_report = numeric_issues
-
-    structured.retrieval_hops = retrieval.diagnostics.get("retrieval_hops", 0)
-    structured.sub_queries_fired = list(retrieval.diagnostics.get("sub_queries", []))
-    structured.retrieval_confidence = retrieval.retrieval_confidence
-
-    diagnostics = dict(retrieval.diagnostics)
-    diagnostics["retrieval_confidence"] = retrieval.retrieval_confidence
-
-    return Answer(
-        query=query,
-        text=text,
-        abstained=structured.abstain,
-        contexts=retrieval.contexts,
-        intent=retrieval.intent,
-        diagnostics=diagnostics,
-        citation_report=report,
-        structured=structured,
-    )
+    Thin wrapper around answer_structured. The two paths used to diverge
+    only in log strings and local variable names; consolidating them
+    removes the drift surface where each shared-behavior change had to
+    be applied in two places.
+    """
+    return answer_structured(query)
 
 
 def _generate_structured(
@@ -373,18 +296,6 @@ def _generate_structured(
         )
     except _GENERATION_ERRORS:
         raise
-    except Exception as exc:
-        logger.exception("Unexpected error in structured generation: %s", type(exc).__name__)
-        return StructuredAnswer(
-            answer_prose="",
-            claims=[],
-            abstain=True,
-            abstain_reason="Generation failed; verify the source documents directly.",
-            # Inherit the forward-looking signal computed once by the intent
-            # classifier so the eval's forward_looking_check passes even on
-            # this abstain stub path.
-            forward_looking=forward_looking_hint,
-        )
 
 
 # ---------------------------------------------------------------------------

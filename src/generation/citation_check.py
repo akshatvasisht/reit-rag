@@ -756,12 +756,14 @@ def check_numeric_consistency(
         # handle them.
         any_atom_has_numeric = False
         all_atoms_found = True
+        failing_atom_was_financial = False
 
         for atom in atoms:
             # Check if this atom has any numeric content to verify
             atom_stripped, _ = _strip_approx(_unicode_normalize(atom))
+            atom_is_financial = bool(FINANCIAL_NUMBER_RE.search(atom_stripped))
             # Skip pure annotation atoms (text without financial digits)
-            if not FINANCIAL_NUMBER_RE.search(atom_stripped) and not _is_non_financial_unit_value(atom):
+            if not atom_is_financial and not _is_non_financial_unit_value(atom):
                 # Pure proper-noun / non-numeric atom — skip.
                 if _is_non_numeric_proper_noun(atom):
                     continue
@@ -770,11 +772,23 @@ def check_numeric_consistency(
 
             if not _atom_found_in_chunk(atom, chunk_text, chunk_values):
                 all_atoms_found = False
+                if atom_is_financial:
+                    failing_atom_was_financial = True
                 break
 
         if any_atom_has_numeric and not all_atoms_found:
+            # When the failing atom carries financial-numeric content AND the
+            # cited chunk extracts zero financial values of any class, the
+            # claim has no basis in the chunk at all — the chunk is likely a
+            # section header, narrative paragraph, or non-data excerpt that
+            # should not have been cited for a numeric claim. Emit a stronger
+            # issue type so downstream graders can distinguish this wrong-
+            # chunk-class case from an ordinary value mismatch.
+            issue_type = "numeric_mismatch"
+            if failing_atom_was_financial and not chunk_values:
+                issue_type = "wrong_chunk_no_financial_values"
             issues.append({
-                "type": "numeric_mismatch",
+                "type": issue_type,
                 "claim": claim.text,
                 "claimed_value": claim.value,
                 "chunk_values_found": chunk_values,
