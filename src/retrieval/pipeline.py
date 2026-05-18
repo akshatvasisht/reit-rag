@@ -119,12 +119,16 @@ _RERANK_TOP_N_BY_INTENT: dict[str, int] = {
 }
 
 
-def _rerank_budget_for_intent(intent: str, default: int = RERANK_TOP_N) -> int:
+def _rerank_budget_for_intent(intent: str, forward_looking: bool = False, default: int = RERANK_TOP_N) -> int:
     """Return the rerank-top-N budget appropriate for the given intent.
 
     Pure function so the dispatch is unit-testable in isolation from the
-    retrieval pipeline.
+    retrieval pipeline.  When forward_looking=True and the intent is "latest",
+    the budget is widened to 7 so that late-page projection tables are not
+    dropped by the tight 5-chunk gate.
     """
+    if forward_looking and intent == "latest":
+        return 7
     return _RERANK_TOP_N_BY_INTENT.get(intent, default)
 
 # Hard cap on total context chunks sent to the LLM.  When conflict chunks are
@@ -157,7 +161,7 @@ _CHUNK_SELECT = """
     company, ticker, doc_type, report_date, period_covered, doc_version,
     section_title, page_number, content_type, source_authority,
     chunk_text, is_parent, token_count,
-    doc_subtype, page_content_class
+    doc_subtype, page_content_class, contextualized_text
 """.strip()
 
 
@@ -929,7 +933,7 @@ def retrieve(
     # answers from multiple evidence chunks that compete for rerank positions;
     # the default 5-chunk gate drops legitimate siblings on those intents.
     if rerank_top_n == RERANK_TOP_N:
-        rerank_top_n = _rerank_budget_for_intent(intent)
+        rerank_top_n = _rerank_budget_for_intent(intent, forward_looking=forward_looking)
     logger.info(
         "Query intent: %s | forward_looking=%s | companies=%s | rerank_top_n=%d | %s",
         intent, forward_looking, companies, rerank_top_n, query,

@@ -96,6 +96,7 @@ class Chunk:
     embedding: Optional[list[float]] = None
     doc_subtype: str = "unknown"  # granular subtype within doc_type; flows from DocumentMeta
     page_content_class: str = "unknown"  # page-level content classification for boilerplate filtering
+    contextualized_text: Optional[str] = None  # Claude-generated chunk context (scripts/contextualize.py); used by reranker as vocab-bridged signal
     id: UUID = field(default_factory=uuid4)
 
     @classmethod
@@ -127,6 +128,7 @@ class Chunk:
             token_count=r.get("token_count"),
             doc_subtype=r.get("doc_subtype", "unknown") or "unknown",
             page_content_class=r.get("page_content_class", "unknown") or "unknown",
+            contextualized_text=r.get("contextualized_text"),
             embedding=None,  # never returned from retrieval queries for efficiency
         )
 

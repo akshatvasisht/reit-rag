@@ -504,6 +504,33 @@ def test_system_prompt_contains_citation_page_anchoring_instruction() -> None:
     )
 
 
+def test_system_prompt_contains_disambiguated_citation_example() -> None:
+    """The SYSTEM_PROMPT must include a worked example showing the disambiguated
+    citation form [Company, Doc Type (Subtype), Month Year, p.N], so the LLM
+    preserves the full doc-type+subtype string instead of collapsing to just
+    the subtype on synthesis-table output.
+
+    Anchor probe: xdoc-adv-7 — the model produced [VICI Properties, Company Update,
+    March 2026, p.7] (collapsed) instead of [VICI Properties, Investor Presentation
+    (Company Update), March 2026, p.7] (full disambiguated form).
+    """
+    from src.generation.generator import _build_system_prompt_with_corpus
+    prompt = _build_system_prompt_with_corpus(["BXP", "VICI Properties"])
+
+    # The example must use the parenthetical subtype form
+    assert "Investor Presentation (Investor Day Session)" in prompt or \
+           "Investor Presentation (Quarterly Investor Deck)" in prompt, (
+        "SYSTEM_PROMPT must show a worked example using the disambiguated "
+        "citation form `[Company, Doc Type (Subtype), Month Year, p.N]`; "
+        f"got prompt head[:800]={prompt[:800]}"
+    )
+    # And must explicitly forbid the collapse-to-subtype behavior
+    assert "abbreviate" in prompt.lower() or "verbatim" in prompt.lower() or "preserve" in prompt.lower(), (
+        "SYSTEM_PROMPT must explicitly instruct not to abbreviate the citation "
+        "to just the subtype; got: " + prompt[:1500]
+    )
+
+
 def test_system_prompt_in_corpus_company_not_found_framing(monkeypatch) -> None:
     """When an in-corpus company is NOT in retrieved contexts, the LLM should use
     'I did not retrieve a chunk from...' framing, NOT 'not in corpus'.

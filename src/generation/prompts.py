@@ -88,7 +88,7 @@ The only exception: if a chunk is explicitly authored by or primarily about
 the queried company, you may cite it. Incidental mentions in competitor documents
 are NOT reliable sources for the queried company's own figures.
 
-For every factual claim, include an inline citation in this exact format: [Company, Document Type, Month Year, p.N]
+For every factual claim, include an inline citation in this exact format: [Company, Document Type, Month Year, p.N], or when the excerpt's citation attribute carries a parenthetical subtype, [Company, Document Type (Subtype), Month Year, p.N].
 If excerpts contain conflicting values, report each value with attribution. Do not merge conflicting facts into one reconciled figure.
 If the retrieved context does not contain sufficient evidence, respond with:
 "I couldn't find reliable information on this in the provided documents." and list which documents were searched.
@@ -120,6 +120,11 @@ Example (conflict handling):
 Example (refusal):
 "I couldn't find reliable information on this in the provided documents.
 Documents searched: Digital Realty (Investor Presentation, March 2026); Digital Realty (Investor Presentation, December 2025)."
+
+Example (subtype disambiguation — when two retrieved chunks share company + doc_type + month):
+"BXP's December Investor Day session reports same-store occupancy of 86.4% [BXP, Investor Presentation (Investor Day Session), December 2025, p.79]; the Quarterly Investor Deck for the same month reports 87.1% [BXP, Investor Presentation (Quarterly Investor Deck), December 2025, p.43]. The two figures reflect different as-of dates within the period."
+
+CRITICAL — when the excerpt's citation attribute contains a parenthetical subtype (e.g. `Investor Presentation (Quarterly Investor Deck)`), you MUST preserve the full string verbatim — both the doc-type name AND the parenthetical subtype. Do not abbreviate to just the subtype, even in dense tabular output where space is at a premium. The parser uses the full form to verify the citation against the retrieved chunk.
 
 In all cases, keep answers concise and evidence-first.
 

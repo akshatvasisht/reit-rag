@@ -50,6 +50,31 @@ def test_override_table_does_not_include_latest() -> None:
     assert "latest" not in _RERANK_TOP_N_BY_INTENT
 
 
+def test_forward_looking_latest_widens_budget() -> None:
+    """forward_looking=True + latest bumps budget from 5 to 7."""
+    assert _rerank_budget_for_intent("latest", forward_looking=True) == 7
+
+
+def test_forward_looking_historical_unchanged() -> None:
+    """forward_looking=True on historical: table value (7) still wins."""
+    assert _rerank_budget_for_intent("historical", forward_looking=True) == 7
+
+
+def test_forward_looking_comparison_unchanged() -> None:
+    """forward_looking=True on comparison: table value (8) still wins."""
+    assert _rerank_budget_for_intent("comparison", forward_looking=True) == 8
+
+
+def test_not_forward_looking_latest_unchanged() -> None:
+    """forward_looking=False + latest: default 5 is preserved."""
+    assert _rerank_budget_for_intent("latest", forward_looking=False) == RERANK_TOP_N
+
+
+def test_forward_looking_defaults_false() -> None:
+    """Callers that omit forward_looking still get the old default behavior."""
+    assert _rerank_budget_for_intent("latest") == RERANK_TOP_N
+
+
 def test_override_table_widens_only_multi_chunk_intents() -> None:
     """Every override must widen to more than the default; a 'narrower-than-
     default' override would be a bug. Also asserts the override values are

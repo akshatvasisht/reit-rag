@@ -31,7 +31,7 @@ _SELECT_COLS = """
     company, ticker, doc_type, report_date, period_covered, doc_version,
     section_title, page_number, content_type, source_authority,
     chunk_text, is_parent, token_count,
-    doc_subtype, page_content_class
+    doc_subtype, page_content_class, contextualized_text
 """.strip()
 
 # Cast to ::halfvec explicitly because the column type is halfvec(1024), not

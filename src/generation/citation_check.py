@@ -283,11 +283,15 @@ def _parse_numeric(value: str) -> float | None:
     v = value.strip().lower()
 
     # Convert accounting-negative parentheticals: (N) or ($N) → -N.
-    paren_match = re.match(r"^\((\$?[\d,]+(?:\.\d+)?[bmkt]?)\)%?$", v)
+    # Handles unit INSIDE parens: (1.8%) → -1.8%   (4.9x) → -4.9x
+    # AND unit OUTSIDE parens:    (1.8)% → -1.8%   (22.3M) → -22.3M
+    paren_match = re.match(
+        r"^\((\$?[\d,]+(?:\.\d+)?(?:%|x|bps|bp|[bmkt])?)\)(%|x|bps|bp)?$", v
+    )
     if paren_match:
         inner = paren_match.group(1)
-        suffix = "%" if v.endswith(")%") else ""
-        v = "-" + inner + suffix
+        outer_unit = paren_match.group(2) or ""
+        v = "-" + inner + outer_unit
 
     # Normalise spelled-out scale words ("$10.5 billion" → "$10.5b").
     scale_match = _SCALE_WORD_RE.search(v)
@@ -402,15 +406,34 @@ def _split_composite_value(value: str) -> list[str]:
         if re.fullmatch(r"\([^()]+\)", stripped):
             paren_parts.append(stripped)
             continue
+        # Also treat whole-string $(N) as an accounting negative token.
+        if re.fullmatch(r"\$\([^()]+\)", stripped):
+            # Rewrite to canonical ($N) form so _parse_numeric handles it.
+            paren_parts.append("(" + "$" + stripped[2:])
+            continue
+        # Regex matches $( prefix as well so the leading $ is consumed along
+        # with the parenthetical and re-attached inside the inner token.
         paren_matches = list(re.finditer(r"\(([^()]+)\)", stripped))
         if paren_matches:
-            outer = re.sub(r"\s*\([^()]+\)\s*", " ", stripped).strip()
+            # Build inner tokens, re-attaching any immediately-preceding $ that
+            # was left stranded when the outer substitution removed "$(N)".
+            inner_tokens: list[str] = []
+            for m in paren_matches:
+                start = m.start()
+                dollar_prefix = "$" if start > 0 and stripped[start - 1] == "$" else ""
+                inner_val = m.group(1).strip()
+                if inner_val:
+                    inner_tokens.append(
+                        "(" + dollar_prefix + inner_val + ")" if dollar_prefix else inner_val
+                    )
+            # Remove $(…) and (…) from the outer string. Strip the leading $
+            # that belonged to a $(…) group.
+            outer = re.sub(r"\$\s*\([^()]+\)\s*|\s*\([^()]+\)\s*", " ", stripped).strip()
+            # Clean up any trailing comma or dollar left by the substitution.
+            outer = outer.rstrip(",$").strip()
             if outer:
                 paren_parts.append(outer)
-            for m in paren_matches:
-                inner = m.group(1).strip()
-                if inner:
-                    paren_parts.append(inner)
+            paren_parts.extend(inner_tokens)
         else:
             paren_parts.append(stripped)
     comma_parts: list[str] = []
