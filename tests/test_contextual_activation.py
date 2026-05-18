@@ -128,14 +128,14 @@ class TestVerifyContextualRetrievalActivated:
 
 
 # ---------------------------------------------------------------------------
-# _check_contextual_activation_at_startup — tests
+# check_contextual_activation — tests
 # ---------------------------------------------------------------------------
 
 
 class TestCheckContextualActivationAtStartup:
     def _get_fn(self):
         from src.retrieval import pipeline  # noqa: PLC0415
-        return pipeline._check_contextual_activation_at_startup
+        return pipeline.check_contextual_activation
 
     def test_high_population_no_warning(self):
         """pct=98.0 → logger.warning NOT called."""

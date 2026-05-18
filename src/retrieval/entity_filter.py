@@ -51,6 +51,17 @@ _STOPWORDS: frozenset[str] = frozenset({
     "Will", "Would", "Should", "Compare", "Rank", "List", "Show", "Give",
     "Tell", "Describe", "Explain", "Summarise", "Summarize", "Find",
     "Report", "Calculate", "Compute", "Identify",
+    # Geographic regions extracted as proper-noun candidates but never
+    # company names — when the answer references "Sunbelt NOI" or
+    # "Northeast portfolio", the OOC guard should not flag the region
+    # itself as an out-of-corpus entity (xdoc-adv-8 closure).
+    "Sunbelt", "Northeast", "Northwest", "Southeast", "Southwest", "Midwest",
+    "Atlantic", "Pacific", "Mountain", "Plains", "Coastal",
+    # Common time-period qualifiers (already partially covered by months
+    # in upstream entries, but include common multi-word and short forms here).
+    "January", "February", "March", "April", "June", "July",
+    "August", "September", "October", "November", "December",
+    "Approximately", "Across", "Including", "Excluding",
 })
 
 # All-caps tokens that are domain vocabulary, not company tickers.  These are
