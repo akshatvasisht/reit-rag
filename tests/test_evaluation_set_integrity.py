@@ -22,8 +22,8 @@ from tests.evaluation_set import (
 
 
 def test_golden_set_count() -> None:
-    assert len(EVALUATION_SET) == 24, (
-        f"Expected 24 entries (g01, g02, g04-g25); got {len(EVALUATION_SET)}"
+    assert len(EVALUATION_SET) == 28, (
+        f"Expected 28 entries (g01, g02, g04-g25, g26-g29); got {len(EVALUATION_SET)}"
     )
 
 
@@ -73,7 +73,7 @@ def test_expect_both_dlr_versions_only_on_g02_and_g16() -> None:
 
 def test_expect_min_companies_in_context_set_on_correct_queries() -> None:
     min_company_ids = {gq.id for gq in EVALUATION_SET if gq.expect_min_companies_in_context is not None}
-    assert min_company_ids == {"g04", "g07", "g17"}, (
+    assert min_company_ids == {"g04", "g07", "g17", "g29"}, (
         f"expect_min_companies_in_context set on unexpected entries: {min_company_ids}"
     )
 

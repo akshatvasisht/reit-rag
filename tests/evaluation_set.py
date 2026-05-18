@@ -71,6 +71,10 @@ class EvaluationQuery:
     expect_no_numerical_attribution_to: str | None = None
     # When True, the harness verifies the structured answer sets forward_looking=True.
     expect_forward_looking: bool = False
+    # When True, intent mismatch is a hard FAIL. When False (default), an
+    # intent mismatch downgrades to soft_fail — useful for queries that could
+    # legitimately route as either "latest" or "comparison".
+    expected_intent_strict: bool = False
 
 
 EVALUATION_SET: list[EvaluationQuery] = [
@@ -406,6 +410,69 @@ EVALUATION_SET: list[EvaluationQuery] = [
             "citations to both sources required."
         ),
         notes="Requires retrieval from both DLR investor presentation and Simon thematic report.",
+    ),
+    # Regression closure cases (g26–g29)
+    EvaluationQuery(
+        id="g26",
+        query="What was Realty Income's full year 2025 AFFO per share?",
+        category="factual_citation",
+        expected_intent="latest",
+        expected_company="Realty Income",
+        human_eval_rubric=(
+            "Answer must report $4.28 per diluted share with citation to RI Q4 2025 "
+            "deck page 40 reconciliation. The full-page reconciliation table lives "
+            "on the same page as a section-title text chunk, so retrieval must "
+            "pull the table chunk alongside any text chunk it surfaces. Faithful "
+            "citation required."
+        ),
+        notes="Regression guard: same-page table chunk must reach the LLM when a text chunk on the same page is retained.",
+    ),
+    EvaluationQuery(
+        id="g27",
+        query="What is BXP's full year 2025 FFO per share guidance?",
+        category="forward_looking_label",
+        expected_intent="latest",
+        expected_company="BXP",
+        expect_soft_refusal=True,
+        human_eval_rubric=(
+            "BXP Investor Day session (December 2025) explicitly DID NOT reaffirm "
+            "the 2025 FFO guidance issued in the July 29, 2025 earnings release. "
+            "Answer must soft-refuse with explicit framing that the December 2025 "
+            "decks do not carry reaffirmed 2025 guidance. Substituting the eventual "
+            "actual ($7.10) as the headline answer is a forward-looking integrity "
+            "violation."
+        ),
+        notes="Regression guard: forward-looking-intent queries must soft-refuse when retrieved chunks lack forward-looking language.",
+    ),
+    EvaluationQuery(
+        id="g28",
+        query="Compare BXP's portfolio occupancy as reported in the December 2025 Investor Day session versus the Q4 2025 quarterly investor deck.",
+        category="version_comparison",
+        expected_intent="comparison",
+        expected_company="BXP",
+        human_eval_rubric=(
+            "Both decks carry BXP occupancy figures. Citations MUST distinguish "
+            "the two BXP December 2025 presentations via subtype in the citation "
+            "header — i.e., [BXP, Investor Presentation (Investor Day Session), "
+            "December 2025, p.X] vs [BXP, Investor Presentation (Quarterly "
+            "Investor Deck), December 2025, p.Y]."
+        ),
+        notes="Regression guard: citations must include doc_subtype when (company, doc_type, report_date) collides across retrieved chunks.",
+    ),
+    EvaluationQuery(
+        id="g29",
+        query="Across all REITs in the corpus, which has the strongest exposure to Sunbelt markets?",
+        category="all_company_synthesis",
+        expected_intent="all_company_synthesis",
+        expected_company=None,
+        expect_min_companies_in_context=4,
+        human_eval_rubric=(
+            "Answer must surface EastGroup Properties as the corpus's Sunbelt-"
+            "industrial primary, with state-level concentration (TX/FL/CA/AZ/NC). "
+            "Synthesis retrieval must reach every named issuer; collapsing to a "
+            "subset and silently excluding EGP is a regression."
+        ),
+        notes="Regression guard: all_company_synthesis must surface at least one chunk per named issuer in the retained set.",
     ),
 ]
 
