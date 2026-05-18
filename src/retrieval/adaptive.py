@@ -17,6 +17,8 @@ from pathlib import Path
 
 from typing import TYPE_CHECKING
 
+from anthropic import Anthropic
+
 from src.models import RetrievedChunk
 
 if TYPE_CHECKING:
@@ -40,6 +42,13 @@ MAX_ADAPTIVE_HOPS = 2
 _HOP_LOG_PATH = Path("logs/adaptive_hops.jsonl")
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
+
+# Module-level singleton; avoids re-instantiating the API client on every call.
+_haiku_client: Anthropic | None = None
+
+# Jaccard token-overlap threshold above which two sub-queries are treated as
+# near-duplicates and the second hop is skipped.
+_TOKEN_OVERLAP_THRESHOLD = 0.90
 
 # Tool schema presented to Haiku when it evaluates evidence sufficiency.
 _RETRIEVE_MORE_TOOL = {
@@ -84,8 +93,51 @@ _SUFFICIENCY_SYSTEM = (
     "- Do NOT call retrieve_more if the query is unanswerable regardless of "
     "additional retrieval (e.g. the fact does not exist in financial documents).\n"
     "- If evidence is sufficient, respond with end_turn — do not explain yourself.\n"
-    "- Sub-questions must be concise and specific (under 30 words)."
+    "- Sub-questions must be concise and specific (under 30 words).\n"
+    "- CRITICAL: the sub-question MUST use a DIFFERENT angle and DIFFERENT vocabulary "
+    "than the original query. Do NOT repeat the original query or any prior sub-question "
+    "verbatim. Target a disjoint set of keywords — e.g. focus on a specific company, "
+    "metric variant, date, or document section not already covered."
 )
+
+
+def _is_duplicate_query(candidate: str, prior_queries: list[str]) -> bool:
+    """Return True if *candidate* duplicates any query in *prior_queries*.
+
+    Two queries are considered duplicates when:
+      1. Their whitespace-collapsed, lowercased strings are identical (exact match), OR
+      2. The Jaccard token overlap between candidate and any prior query is >= 90%.
+
+    This is the safety-net guard for 2j — the Haiku prompt already instructs a
+    different angle, but this guard catches any slippage.  Only trivially-identical
+    and near-identical queries are rejected; legitimately similar formulations with
+    meaningfully different vocabulary pass through.
+
+    Evidence: bxp-morn-basic-1, xdoc-basic-1, xdoc-adv-6 all show identical
+    sub_queries across hops, adding zero retrieval coverage.
+    """
+    def _normalise(text: str) -> str:
+        return " ".join(text.lower().split())
+
+    def _tokens(text: str) -> frozenset[str]:
+        return frozenset(text.lower().split())
+
+    candidate_norm = _normalise(candidate)
+    candidate_tokens = _tokens(candidate)
+
+    for prior in prior_queries:
+        # Exact match after normalisation.
+        if candidate_norm == _normalise(prior):
+            return True
+        # Token-overlap guard (Jaccard index >= threshold).
+        prior_tokens = _tokens(prior)
+        union = candidate_tokens | prior_tokens
+        if union:  # guard against empty-string edge case
+            intersection = candidate_tokens & prior_tokens
+            jaccard = len(intersection) / len(union)
+            if jaccard >= _TOKEN_OVERLAP_THRESHOLD:
+                return True
+    return False
 
 
 def _build_evidence_summary(contexts: list[RetrievedChunk]) -> str:
@@ -119,14 +171,19 @@ def _log_hop(record: dict) -> None:
         pass
 
 
-def _get_haiku_client():  # type: ignore[return]
-    """Return a lazy-initialised Anthropic client for adaptive hop calls."""
-    from anthropic import Anthropic as _Anthropic
+def _get_haiku_client() -> Anthropic:
+    """Return a lazy-initialised Anthropic client for adaptive hop calls.
 
+    Cached as a module-level singleton.
+    """
+    global _haiku_client
+    if _haiku_client is not None:
+        return _haiku_client
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not set")
-    return _Anthropic(api_key=api_key)
+    _haiku_client = Anthropic(api_key=api_key)
+    return _haiku_client
 
 
 def adaptive_retrieve(
@@ -157,6 +214,9 @@ def adaptive_retrieve(
     seen_chunk_ids: set = {rc.chunk.id for rc in initial_result.contexts}
     merged_contexts: list[RetrievedChunk] = list(initial_result.contexts)
     sub_queries: list[str] = []
+    # All queries issued so far — used by the duplicate guard.  Seeded with the
+    # original query so that a hop-1 sub-query identical to it is rejected.
+    _all_prior_queries: list[str] = [query]
 
     try:
         client = _get_haiku_client()
@@ -199,13 +259,52 @@ def adaptive_retrieve(
             break
 
         try:
-            sub_query: str = tool_block.input["query"]
-            company_filter: list[str] = tool_block.input.get("company_filter") or []
+            sub_query_raw = tool_block.input["query"]
+            company_filter_raw = tool_block.input.get("company_filter")
         except (KeyError, TypeError, AttributeError) as exc:
             logger.warning("Adaptive orchestrator: malformed tool input: %s", exc)
             _log_hop({"hop": hop + 1, "query": query, "error": f"malformed_tool: {exc}"})
             break
 
+        if not isinstance(sub_query_raw, str) or not sub_query_raw.strip():
+            logger.warning("Adaptive orchestrator: invalid sub_query type/empty: %r", sub_query_raw)
+            _log_hop({"hop": hop + 1, "query": query, "error": "malformed_tool: bad sub_query"})
+            break
+        sub_query: str = sub_query_raw
+
+        if company_filter_raw is None:
+            company_filter: list[str] = []
+        elif isinstance(company_filter_raw, str):
+            company_filter = [company_filter_raw]
+        elif isinstance(company_filter_raw, (list, tuple)) and all(
+            isinstance(c, str) for c in company_filter_raw
+        ):
+            company_filter = list(company_filter_raw)
+        else:
+            logger.warning(
+                "Adaptive orchestrator: invalid company_filter: %r", company_filter_raw
+            )
+            _log_hop(
+                {"hop": hop + 1, "query": query, "error": "malformed_tool: bad company_filter"}
+            )
+            break
+
+        if _is_duplicate_query(sub_query, _all_prior_queries):
+            logger.info(
+                "Adaptive hop %d: sub_query=%r is a duplicate/near-duplicate of a prior "
+                "query — skipping hop to avoid zero-coverage retrieval pass.",
+                hop + 1, sub_query,
+            )
+            _log_hop({
+                "hop": hop + 1,
+                "original_query": query,
+                "sub_query": sub_query,
+                "skipped": "duplicate_guard",
+            })
+            break
+        # ----------------------------------------
+
+        _all_prior_queries.append(sub_query)
         sub_queries.append(sub_query)
         logger.info(
             "Adaptive hop %d: sub_query=%r company_filter=%s",

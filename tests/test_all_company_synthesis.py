@@ -252,7 +252,7 @@ def test_retrieve_routing_synthesis_calls_synthesis_function(monkeypatch) -> Non
     """When intent is all_company_synthesis, retrieve() must call the synthesis function."""
     called_with: list[str] = []
 
-    def mock_synthesis(query, conn):
+    def mock_synthesis(query, conn, **_kwargs):
         called_with.append(query)
         return RetrievalResult(
             query=query,
@@ -265,10 +265,9 @@ def test_retrieve_routing_synthesis_calls_synthesis_function(monkeypatch) -> Non
 
     from src.retrieval import pipeline as _pipeline
 
-    monkeypatch.setattr(_pipeline, "classify_intent", lambda q: "all_company_synthesis")
+    monkeypatch.setattr(_pipeline, "classify_intent_full", lambda q: ("all_company_synthesis", False))
     monkeypatch.setattr(_pipeline, "extract_companies", lambda q: [])
     monkeypatch.setattr(_pipeline, "retrieve_all_company_synthesis", mock_synthesis)
-    # connect() should not be called for non-synthesis path; patch it to detect leaks.
     monkeypatch.setattr(_pipeline, "connect", lambda: MagicMock().__enter__())
 
     result = _pipeline.retrieve("Which REIT has the highest NOI growth?")
@@ -280,7 +279,7 @@ def test_retrieve_routing_non_synthesis_skips_synthesis_function(monkeypatch) ->
     """When intent is latest, retrieve_all_company_synthesis must not be called."""
     synthesis_called: list[bool] = []
 
-    def mock_synthesis(query, conn):
+    def mock_synthesis(query, conn, **_kwargs):
         synthesis_called.append(True)
         return RetrievalResult(
             query=query, intent="all_company_synthesis",
@@ -289,7 +288,7 @@ def test_retrieve_routing_non_synthesis_skips_synthesis_function(monkeypatch) ->
 
     from src.retrieval import pipeline as _pipeline
 
-    monkeypatch.setattr(_pipeline, "classify_intent", lambda q: "latest")
+    monkeypatch.setattr(_pipeline, "classify_intent_full", lambda q: ("latest", False))
     monkeypatch.setattr(_pipeline, "extract_companies", lambda q: [])
     monkeypatch.setattr(_pipeline, "retrieve_all_company_synthesis", mock_synthesis)
 

@@ -33,7 +33,7 @@ _SELECT_COLS = """
 # stage would hurt recall more than it helps precision).
 _BOILERPLATE_FILTER = (
     "AND (page_content_class IS NULL"
-    " OR page_content_class NOT IN ('boilerplate_legal', 'index_reference'))"
+    " OR page_content_class NOT IN ('boilerplate_legal', 'index_reference', 'cover_page'))"
 )
 
 # Use plainto_tsquery for English-aware tokenization/stemming/stop-word removal,

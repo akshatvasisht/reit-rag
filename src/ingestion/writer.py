@@ -115,6 +115,7 @@ def write_chunks(conn: Connection, chunks: list[Chunk], batch_size: int = 100) -
                      source_authority, chunk_text, embedding, is_parent,
                      token_count, doc_subtype, page_content_class)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
                 """,
                 params,
             )

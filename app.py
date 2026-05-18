@@ -46,17 +46,55 @@ def _confidence_label(retrieval_confidence: float, abstained: bool) -> str:
     return "Low confidence"
 
 
+def _rerank_label(rerank_score: float | None) -> str:
+    """Return a human-readable rerank score label for a retrieved chunk.
+
+    Chunks injected via parent expansion, sibling expansion, or conflict
+    injection are not passed through the cross-encoder and therefore have
+    no rerank score. Displaying a bare "—" for these is confusing; this
+    helper replaces it with an explanatory label so the reviewer knows the
+    chunk was included for structural context rather than ranked relevance.
+
+    Args:
+        rerank_score: The cross-encoder rerank score, or None for expanded
+            chunks that bypassed the reranker.
+
+    Returns:
+        A formatted score string (e.g. "1.23") for scored chunks, or a
+        descriptive label for unscored expanded context chunks.
+    """
+    if rerank_score is None:
+        return "unscored expanded context (parent/sibling/conflict)"
+    return f"{rerank_score:.2f}"
+
+
 def _render_sources(contexts: list[RetrievedChunk]) -> None:
     """Per-source expander panel showing every retrieved context."""
     if not contexts:
         st.info("No source excerpts to display.")
         return
 
+    collision_counts: dict[tuple, int] = {}
+    for rc in contexts:
+        c = rc.chunk
+        key = (
+            getattr(c, "company", None),
+            getattr(c, "doc_type", None),
+            getattr(c, "report_date", None),
+        )
+        collision_counts[key] = collision_counts.get(key, 0) + 1
+    colliding_keys = {k for k, n in collision_counts.items() if n >= 2}
+
     st.subheader(f"Sources ({len(contexts)})")
     for i, rc in enumerate(contexts, start=1):
         c = rc.chunk
-        header = format_citation_header(c)
-        rerank = f"{rc.rerank_score:.2f}" if rc.rerank_score is not None else "—"
+        key = (
+            getattr(c, "company", None),
+            getattr(c, "doc_type", None),
+            getattr(c, "report_date", None),
+        )
+        header = format_citation_header(c, disambiguate=key in colliding_keys)
+        rerank = _rerank_label(rc.rerank_score)
         expander_label = f"{i}. {header} · rerank {rerank}"
         with st.expander(expander_label):
             left, right = st.columns(2)
@@ -96,7 +134,15 @@ def _warm_models() -> None:
     _get_cross_encoder()
 
 
+@st.cache_resource(show_spinner=False)
+def _startup_checks() -> None:
+    """Run app-entrypoint checks that require the DB; invoked once per process."""
+    from src.retrieval.pipeline import check_contextual_activation
+    check_contextual_activation()
+
+
 _warm_models()
+_startup_checks()
 
 
 st.title("Corporate RAG for REIT Investor Presentations")

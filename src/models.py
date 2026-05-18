@@ -30,7 +30,7 @@ class Claim:
     citation: str          # Full citation string: "Company, Doc Type, Month Year, p.N"
     citation_company: str  # Parsed company name from citation
     citation_date: str     # Parsed date from citation e.g. "March 2026"
-    citation_page: int     # Parsed page number from citation
+    citation_page: int | None  # Parsed page number from citation; None when the cited chunk lacks a page
 
 
 @dataclass
@@ -142,3 +142,11 @@ class RetrievedChunk:
     vector_rank: Optional[int] = None
     fused_score: Optional[float] = None
     rerank_score: Optional[float] = None
+    # Provenance fields (2g) — indicate how this chunk arrived in the context.
+    # Values: "reranked" | "parent_expanded" | "sibling_expanded" |
+    #         "conflict_injected" | "table_pair_expanded"
+    retrieval_stage: Optional[str] = None
+    # ID (as str) of the chunk that triggered this expansion, when applicable.
+    trigger_chunk_id: Optional[str] = None
+    # Human-readable description of why this chunk was included.
+    expansion_reason: Optional[str] = None

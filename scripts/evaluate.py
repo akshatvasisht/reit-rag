@@ -65,6 +65,7 @@ class EvaluationResult:
     ooc_attribution_check: bool | None
     min_companies_check: bool | None
     forward_looking_check: bool | None
+    soft_refusal_check: bool | None
     # Raw signals for human review
     top_rerank: float
     retrieval_confidence: float
@@ -76,9 +77,12 @@ class EvaluationResult:
     context_content_types: list[str]
     answer_text: str
     # Aggregate
-    auto_pass: bool  # True if all auto checks pass
+    auto_pass: bool  # True if all hard auto checks pass (soft fails do not gate)
     auto_pass_reasons: list[str] = field(default_factory=list)
     auto_fail_reasons: list[str] = field(default_factory=list)
+    # Soft fails: signals worth surfacing in the report but not gating auto_pass
+    # (e.g. intent mismatch on a query flagged expected_intent_strict=False).
+    auto_soft_fail_reasons: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +101,13 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
     retrieval_conf_band = confidence_band(retrieval_conf) if not a.abstained else "n/a"
 
     # Auto-check each pass dimension where the EvaluationQuery declares it.
+    # expected_intent may be a single value OR a list of acceptable values.
     intent_match = None
     if gq.expected_intent is not None:
-        intent_match = a.intent == gq.expected_intent
+        if isinstance(gq.expected_intent, list):
+            intent_match = a.intent in gq.expected_intent
+        else:
+            intent_match = a.intent == gq.expected_intent
 
     company_filter_match = None
     if gq.expected_company is not None:
@@ -190,9 +198,32 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
         else:
             forward_looking_check = None
 
+    # Soft-refusal check: when expect_soft_refusal=True the answer must either
+    # abstain or contain recognised soft-refusal language.  An answer that
+    # provides substantive content when a refusal is expected is a hard fail.
+    soft_refusal_check = None
+    if gq.expect_soft_refusal:
+        _soft_refusal_phrases = (
+            "not disclosed",
+            "not provided",
+            "do not contain",
+            "does not contain",
+            "cannot determine",
+            "not found",
+            "no information",
+            "not available",
+        )
+        text_lower = a.text.lower()
+        _text_has_refusal = any(p in text_lower for p in _soft_refusal_phrases)
+        soft_refusal_check = bool(a.abstained) or _text_has_refusal
+
     # Aggregate pass/fail.
     reasons_pass: list[str] = []
     reasons_fail: list[str] = []
+    # Soft checks contribute a signal name to pass/fail but do NOT gate
+    # auto_pass when failing — used for debatable signals like ambiguous-intent
+    # queries flagged with expected_intent_strict=False.
+    reasons_soft_fail: list[str] = []
     auto_checks = [
         ("intent", intent_match),
         ("company_filter", company_filter_match),
@@ -202,12 +233,18 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
         ("ooc_attribution_check", ooc_attribution_check),
         ("min_companies_check", min_companies_check),
         ("forward_looking_check", forward_looking_check),
+        ("soft_refusal", soft_refusal_check),
     ]
     for name, val in auto_checks:
         if val is True:
             reasons_pass.append(name)
         elif val is False:
-            reasons_fail.append(name)
+            if name == "intent" and not gq.expected_intent_strict:
+                reasons_soft_fail.append("intent_soft")
+            elif name == "soft_refusal":
+                reasons_fail.append("expected_soft_refusal_but_answered")
+            else:
+                reasons_fail.append(name)
     # Citation faithfulness: any unsupported citation is a fail.
     if cit_ratio is not None:
         if cit_ratio == 1.0:
@@ -228,6 +265,7 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
         ooc_attribution_check=ooc_attribution_check,
         min_companies_check=min_companies_check,
         forward_looking_check=forward_looking_check,
+        soft_refusal_check=soft_refusal_check,
         top_rerank=top_rerank,
         retrieval_confidence=retrieval_conf,
         retrieval_confidence_band=retrieval_conf_band,
@@ -240,6 +278,7 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
         auto_pass=len(reasons_fail) == 0,
         auto_pass_reasons=reasons_pass,
         auto_fail_reasons=reasons_fail,
+        auto_soft_fail_reasons=reasons_soft_fail,
     )
 
 
@@ -504,7 +543,10 @@ def render_markdown(
     for r in evaluation:
         mark = "✅" if r.auto_pass else "❌"
         passes = ",".join(r.auto_pass_reasons) or "—"
-        fails = ",".join(r.auto_fail_reasons) or "—"
+        fail_parts = list(r.auto_fail_reasons)
+        if r.auto_soft_fail_reasons:
+            fail_parts.extend(f"~{s}" for s in r.auto_soft_fail_reasons)
+        fails = ",".join(fail_parts) or "—"
         q = r.query[:60] + ("…" if len(r.query) > 60 else "")
         lines.append(
             f"| {r.id} | {r.category} | {q} | {mark} | {passes} | {fails} "
@@ -664,6 +706,8 @@ def render_markdown(
             lines.append(f"- Min companies in context: {_fmt_check(r.min_companies_check)}")
         if r.forward_looking_check is not None:
             lines.append(f"- Forward-looking label check: {_fmt_check(r.forward_looking_check)}")
+        if r.soft_refusal_check is not None:
+            lines.append(f"- Soft-refusal check: {_fmt_check(r.soft_refusal_check)}")
         lines.append("")
         lines.append("```")
         lines.append(r.answer_text[:800] + ("…" if len(r.answer_text) > 800 else ""))

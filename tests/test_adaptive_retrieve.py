@@ -274,7 +274,7 @@ def test_retrieve_latest_intent_skips_adaptive(monkeypatch) -> None:
 
     from src.retrieval import pipeline as _pipeline
 
-    monkeypatch.setattr(_pipeline, "classify_intent", lambda q: "latest")
+    monkeypatch.setattr(_pipeline, "classify_intent_full", lambda q: ("latest", False))
     monkeypatch.setattr(_pipeline, "extract_companies", lambda q: [])
     monkeypatch.setattr(_pipeline, "adaptive_retrieve", _mock_adaptive)
 
@@ -305,7 +305,7 @@ def test_retrieve_adaptive_intents_run_adaptive(monkeypatch, intent: str) -> Non
 
     from src.retrieval import pipeline as _pipeline
 
-    monkeypatch.setattr(_pipeline, "classify_intent", lambda q: intent)
+    monkeypatch.setattr(_pipeline, "classify_intent_full", lambda q: (intent, False))
     monkeypatch.setattr(_pipeline, "extract_companies", lambda q: [])
     monkeypatch.setattr(_pipeline, "adaptive_retrieve", _mock_adaptive)
 
@@ -336,7 +336,7 @@ def test_retrieve_all_company_synthesis_routes_through_synthesis_then_adaptive(
         diagnostics={"top_rerank_score": 2.0},
     )
 
-    def _mock_synthesis(query, conn):
+    def _mock_synthesis(query, conn, **_kwargs):
         synthesis_called.append(True)
         return synthesis_result
 
@@ -346,7 +346,7 @@ def test_retrieve_all_company_synthesis_routes_through_synthesis_then_adaptive(
 
     from src.retrieval import pipeline as _pipeline
 
-    monkeypatch.setattr(_pipeline, "classify_intent", lambda q: "all_company_synthesis")
+    monkeypatch.setattr(_pipeline, "classify_intent_full", lambda q: ("all_company_synthesis", False))
     monkeypatch.setattr(_pipeline, "extract_companies", lambda q: [])
     monkeypatch.setattr(_pipeline, "retrieve_all_company_synthesis", _mock_synthesis)
     monkeypatch.setattr(_pipeline, "adaptive_retrieve", _mock_adaptive)
@@ -400,7 +400,7 @@ def test_answer_structured_populates_hop_diagnostics(monkeypatch) -> None:
 
     captured: list[StructuredAnswer] = []
 
-    def _mock_generate(query, contexts, intent="latest"):
+    def _mock_generate(query, contexts, intent="latest", forward_looking_hint=False, system_prompt_override=None):
         sa = StructuredAnswer(
             answer_prose="DLR leverage is 5.2x.",
             claims=[],

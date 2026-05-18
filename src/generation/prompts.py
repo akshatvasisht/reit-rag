@@ -49,8 +49,8 @@ ANSWER_JSON_SCHEMA: dict = {
                         "description": "Date parsed from the citation string, e.g. 'March 2026'."
                     },
                     "citation_page": {
-                        "type": "integer",
-                        "description": "Page number parsed from the citation string."
+                        "type": ["integer", "null"],
+                        "description": "Page number parsed from the citation string. Null when the cited chunk lacks a page (rendered as 'p.?' in the excerpt header)."
                     },
                 }
             }
@@ -93,6 +93,21 @@ If excerpts contain conflicting values, report each value with attribution. Do n
 If the retrieved context does not contain sufficient evidence, respond with:
 "I couldn't find reliable information on this in the provided documents." and list which documents were searched.
 Never cite a source for a claim you generated from general knowledge.
+
+CRITICAL — distinguish retrieval-miss from corpus-absence:
+The retrieved chunks reflect what the retriever returned, not what the corpus
+contains. When a query touches a company you did not retrieve evidence for,
+say "the retrieved chunks do not include data from [Company]" — NEVER claim
+the company is absent from the corpus unless you have explicit knowledge of
+the corpus composition. Conflating retrieval miss with corpus absence
+misleads the user into believing the corpus is smaller than it actually is.
+Example (correct framing):
+"The retrieved chunks do not include data from Realty Income for this metric. Other
+in-corpus companies surfaced this figure: ..."
+Example (incorrect framing — DO NOT do this):
+"Realty Income is not in the indexed corpus."
+
+
 Distinguish reported figures from forward-looking guidance: label guidance as "Management guided..." not as fact.
 When a query depends on data found only in a chart that was not text-extractable, say so explicitly and cite the page rather than guessing numbers.
 
@@ -151,17 +166,35 @@ def _format_doc_type(raw: str) -> str:
     return " ".join(part.capitalize() for part in raw.split("_"))
 
 
-def format_citation_header(chunk_or_meta) -> str:
+def _format_doc_subtype(raw: str) -> str:
+    """Convert 'investor_day_session' → 'Investor Day Session'."""
+    return " ".join(part.capitalize() for part in raw.split("_"))
+
+
+def format_citation_header(chunk_or_meta, *, disambiguate: bool = False) -> str:
     """Build the inline-citation header `[Company, Doc Type, Month Year, p.N]`.
 
-    Accepts either a `Chunk` or any object with company / doc_type / report_date
-    / page_number attributes.
+    When ``disambiguate=True`` and the chunk has a non-empty ``doc_subtype``,
+    emits the extended form ``[Company, Doc Type (Subtype), Month Year, p.N]``
+    so two decks with the same (company, doc_type, report_date) remain
+    distinguishable in the answer text. Anchor case: BXP Investor Day Session
+    vs Quarterly Investor Deck, both December 2025; PSA Company Update vs
+    Merger Presentation, both March 2026.
+
+    Accepts either a `Chunk` or any object with company / doc_type /
+    report_date / page_number / doc_subtype attributes.
     """
     company = getattr(chunk_or_meta, "company", "Unknown")
     doc_type = _format_doc_type(getattr(chunk_or_meta, "doc_type", "Unknown"))
     date_str = _format_date(getattr(chunk_or_meta, "report_date", None))
     page = getattr(chunk_or_meta, "page_number", None)
     page_str = f"p.{page}" if page is not None else "p.?"
+
+    if disambiguate:
+        subtype = getattr(chunk_or_meta, "doc_subtype", None)
+        if subtype:
+            doc_type = f"{doc_type} ({_format_doc_subtype(subtype)})"
+
     return f"[{company}, {doc_type}, {date_str}, {page_str}]"
 
 
@@ -181,10 +214,31 @@ def format_context_block(contexts: list[RetrievedChunk]) -> str:
     if not contexts:
         return "<excerpts>(no retrieved context)</excerpts>"
 
+    # When a (company, doc_type, report_date) triple appears in ≥2 retrieved
+    # chunks, the citation for those chunks must include doc_subtype to remain
+    # distinguishable in the answer text.
+    collision_counts: dict[tuple[str, str, object], int] = {}
+    for rc in contexts:
+        c = rc.chunk
+        key = (
+            getattr(c, "company", None),
+            getattr(c, "doc_type", None),
+            getattr(c, "report_date", None),
+        )
+        collision_counts[key] = collision_counts.get(key, 0) + 1
+    colliding_keys: set[tuple[str, str, object]] = {
+        k for k, n in collision_counts.items() if n >= 2
+    }
+
     blocks: list[str] = ["<excerpts>"]
     for i, rc in enumerate(contexts, start=1):
         c = rc.chunk
-        header = format_citation_header(c)
+        key = (
+            getattr(c, "company", None),
+            getattr(c, "doc_type", None),
+            getattr(c, "report_date", None),
+        )
+        header = format_citation_header(c, disambiguate=key in colliding_keys)
         section = (c.section_title or "—").replace('"', "'")
         content_note = ""
         if c.content_type == "chart_caption":
