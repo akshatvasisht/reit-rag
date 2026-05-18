@@ -1,4 +1,4 @@
-"""Tests for the rerank score label helper in app.py (fix 2h).
+"""Tests for the rerank score label helper in app.py.
 
 Verifies that chunks with rerank_score=None show a descriptive label
 instead of the bare "—" that was previously displayed.

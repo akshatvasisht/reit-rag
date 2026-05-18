@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import pytest
-
 from src.generation.citation_check import check_numeric_consistency
 from src.models import Claim, Chunk, RetrievedChunk, StructuredAnswer
 
@@ -187,8 +185,7 @@ def test_basis_points_match() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Baseline normalization fixes (Unicode dash, approx marker, range parsing)
-# Previously labelled "baseline" in the register — implemented here.
+# Baseline normalization (Unicode dash, approx marker, range parsing)
 # ---------------------------------------------------------------------------
 
 
@@ -211,7 +208,7 @@ def test_approximation_word_approximately_matches() -> None:
 
 
 def test_unicode_en_dash_in_chunk_matches_ascii_hyphen_claim() -> None:
-    """Chunk uses U+2013 en-dash ('8–12%'), claim uses ASCII hyphen ('8-12%')."""
+    """Chunk uses U+2013 en-dash in '8-12%', claim uses ASCII hyphen ('8-12%')."""
     chunk = _make_chunk(chunk_text="2026 same-store NOI guidance: 8–12% growth.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("Guidance is 8-12% growth.", value="8-12%")
@@ -243,7 +240,7 @@ def test_single_value_within_chunk_range_accepted() -> None:
 
 
 def test_composite_semicolon_separated_values_match() -> None:
-    """'~89% end of 2026; 87.25%–88% average' - semicolon split, atoms in chunk."""
+    """'~89% end of 2026; 87.25%-88% average' - semicolon split, atoms in chunk."""
     chunk = _make_chunk(chunk_text="Leased 89% at end of 2026, average 87.25%-88%.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("BXP occupancy.", value="~89% end of 2026; 87.25%–88% average")

@@ -56,7 +56,6 @@ def _mock_connect(row: tuple | None):
 
 class TestVerifyContextualRetrievalActivated:
     def _import_fn(self):
-        # Import fresh each time in case module-level state differs
         import scripts.contextualize as ctx  # noqa: PLC0415
         return ctx.verify_contextual_retrieval_activated
 
@@ -167,7 +166,6 @@ class TestCheckContextualActivationAtStartup:
 
         mock_logger.warning.assert_called_once()
         call_args = mock_logger.warning.call_args
-        # Reconstruct the formatted message from the format string + args
         fmt = call_args[0][0]
         pos_args = call_args[0][1:]
         formatted = fmt % pos_args

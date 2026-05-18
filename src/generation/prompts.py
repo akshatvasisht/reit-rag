@@ -250,27 +250,19 @@ def format_context_block(contexts: list[RetrievedChunk]) -> str:
     # When a (company, doc_type, report_date) triple appears in ≥2 retrieved
     # chunks, the citation for those chunks must include doc_subtype to remain
     # distinguishable in the answer text.
-    collision_counts: dict[tuple[str, str, object], int] = {}
+    collision_counts: dict[tuple[str, str, str], int] = {}
     for rc in contexts:
         c = rc.chunk
-        key = (
-            getattr(c, "company", None),
-            getattr(c, "doc_type", None),
-            getattr(c, "report_date", None),
-        )
+        key = (c.company, c.doc_type, c.report_date)
         collision_counts[key] = collision_counts.get(key, 0) + 1
-    colliding_keys: set[tuple[str, str, object]] = {
+    colliding_keys: set[tuple[str, str, str]] = {
         k for k, n in collision_counts.items() if n >= 2
     }
 
     blocks: list[str] = ["<excerpts>"]
     for i, rc in enumerate(contexts, start=1):
         c = rc.chunk
-        key = (
-            getattr(c, "company", None),
-            getattr(c, "doc_type", None),
-            getattr(c, "report_date", None),
-        )
+        key = (c.company, c.doc_type, c.report_date)
         header = format_citation_header(c, disambiguate=key in colliding_keys)
         section = (c.section_title or "—").replace('"', "'")
         content_note = ""

@@ -1,4 +1,4 @@
-"""Tests for cover_page BM25 exclusion (fix 2f).
+"""Tests for cover_page BM25 exclusion.
 
 Verifies that chunks classified as cover_page are excluded from BM25
 retrieval results, matching the existing boilerplate_legal / index_reference

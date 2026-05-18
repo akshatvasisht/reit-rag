@@ -702,19 +702,12 @@ def _apply_post_rerank_pipeline(
             )
 
     # Stage 5b — table-pair expansion (answered path only).
-    # For each text chunk in the retained set, include same-page table/chart
-    # chunks that may have been ranked below the top-N cutoff by the reranker.
     if not abstain:
         with_table_pairs = expand_table_pairs(with_siblings, conn)
     else:
         with_table_pairs = list(with_siblings)
 
     # Stage 5c — sibling-page expansion (answered path only).
-    # For every page touched by a rerank-scored chunk, pull in up to four
-    # additional same-page chunks of any content type. Addresses sparse-
-    # microchunk and split-entity cases where the target answer's surrounding
-    # context lives on the same page but in a different chunk that did not
-    # match the query lexically on its own.
     if not abstain:
         with_sibling_pages = expand_sibling_pages(with_table_pairs, conn)
     else:

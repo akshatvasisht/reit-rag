@@ -28,7 +28,11 @@ Hierarchical small-to-large at structural boundaries from Docling output. Child 
 
 ## Retrieval Approach
 
-Hybrid: BM25 (PostgreSQL tsvector) and dense (Qwen3-Embedding-0.6B + pgvector HNSW) fire in parallel, fuse via Reciprocal Rank Fusion (k=60), then a local cross-encoder (`ms-marco-MiniLM-L-6-v2`) reranks the top candidates. Hybrid is non-negotiable for financial documents — exact-term matches (tickers, FFO, NOI, Q4 2025) need lexical retrieval, semantic queries ("how leveraged is DLR") need dense. An entity pre-filter narrows the candidate pool when the query names a known company; abstention fires when the top rerank score falls below a calibrated threshold or the LLM's own system prompt cannot ground an answer in the retrieved context.
+Hybrid: BM25 (PostgreSQL tsvector) and dense (Qwen3-Embedding-0.6B + pgvector HNSW) fire in parallel, fuse via Reciprocal Rank Fusion (k=60), then a local cross-encoder (`ms-marco-MiniLM-L-6-v2`) reranks the top candidates. The cross-encoder scores `(query, contextualized_text or chunk_text)` pairs, so the vocab-bridging signal from contextualization flows through every retrieval stage. Hybrid is non-negotiable for financial documents — exact-term matches (tickers, FFO, NOI, Q4 2025) need lexical retrieval, semantic queries ("how leveraged is DLR") need dense. An entity pre-filter narrows the candidate pool when the query names a known company; abstention fires when the top rerank score falls below a calibrated threshold or the LLM's own system prompt cannot ground an answer in the retrieved context.
+
+Contextualization runs via the Anthropic Batch API (`scripts/contextualize.py`) and populates a `contextualized_text` column per chunk — a one-line situating prefix derived from neighboring chunks. BM25, dense retrieval, and the reranker all consume this signal: BM25 unions the `chunk_text` and `contextualized_text` tsvectors at query time, dense retrieval re-embeds against the contextualized form, and the cross-encoder scores against it. The Batch API is the live ingestion path, not a deferred plan.
+
+A page-content classifier (`src/ingestion/page_classifier.py`, Claude Haiku with a keyword pre-filter and LLM fallback) tags each chunk with `page_content_class` ∈ {`substantive`, `boilerplate_legal`, `index_reference`, `cover_page`}. BM25 retrieval excludes the three non-substantive classes via a SQL filter in `src/retrieval/bm25.py`; dense retrieval is left unfiltered (embedding distance handles such pages without the precision cost at recall stage). This prevents, e.g., a Digital Realty trademark/disclaimer page from outranking the substantive p.4–7 strategy content on a broad strategy query.
 
 ## Versioning
 
@@ -36,7 +40,7 @@ Documents are grouped into version groups by `(company, doc_type, doc_subtype)`,
 
 ## Conflicting Information
 
-When the retrieved context contains figures that disagree across sources, the system surfaces each value with its own inline citation `[Company, Doc Type, Date, p.N]` rather than merging or averaging. The system prompt instructs the LLM to label management guidance as "Management guided…" rather than as reported fact. A post-generation citation faithfulness check parses every citation out of the answer and verifies it maps to a chunk that was actually in the retrieved context; unsupported citations surface as a UI warning rather than being silently allowed through.
+When the retrieved context contains figures that disagree across sources, the system surfaces each value with its own inline citation `[Company, Doc Type, Date, p.N]` rather than merging or averaging. When two chunks share `(company, doc_type, report_date)` — e.g. the BXP Investor Day Session vs Quarterly Investor Deck, both December 2025 — the citation is automatically extended to `[Company, Doc Type (Subtype), Month Year, p.N]` to keep references unambiguous. The system prompt instructs the LLM to label management guidance as "Management guided…" rather than as reported fact. When a query carries forward-looking vocabulary (guidance / target / outlook / projection / forecast) but no retrieved chunk contains forward-looking language, the system prompt is augmented (in `src/generation/generator.py`) to force a soft refusal rather than letting the model present historical actuals as guidance. A post-generation citation faithfulness check parses every citation out of the answer and verifies it maps to a chunk that was actually in the retrieved context; unsupported citations surface as a UI warning rather than being silently allowed through. A complementary numeric-consistency check (`src/generation/citation_check.py:check_numeric_consistency`) verifies every numeric claim against the cited chunk text — composite values are split atomically, parenthetical negatives are handled, and scale words and unit categories are normalized before comparison.
 
 ## Charts and Tables
 
@@ -75,15 +79,44 @@ Confidence is computed on the post-rerank chunk list, before conflict injection 
 - **Citation faithfulness is source-level, not claim-level.** The check verifies that every cited chunk was in the retrieved context, not that the chunk's content actually supports the specific claim attached. Claim-level verification is RAGAS territory and runs offline.
 - **Multi-tenant access control is conceptual.** The metadata schema is RLS-ready but row-level security is not configured; documents are treated as a single tenant.
 - **Vision extraction can be conservative.** When a chart value isn't fully readable, the model marks it "approximately" — which is correct behavior, but means some answers carry hedged numbers.
-- **Corpus knowledge is hardcoded.** `src/ingestion/metadata.py` maps filename keywords to document metadata; entity filtering and the "latest-period" classifier read from this same registry. Production path is LLM-based metadata extraction at ingestion (RAGFlow / Haystack pattern), with entity vocabulary derived from `SELECT DISTINCT company FROM documents`.
+- **Corpus knowledge is hardcoded.** `src/corpus_registry.py` is the canonical registry mapping filename keywords to document metadata (re-exported from `src/ingestion/metadata.py` for backward compatibility); entity filtering and the "latest-period" classifier read from this same registry. Production path is LLM-based metadata extraction at ingestion (RAGFlow / Haystack pattern), with entity vocabulary derived from `SELECT DISTINCT company FROM documents`.
 
 ## What I Would Improve With More Time
 
-- **Run Contextual Retrieval at scale.** The schema and script for Anthropic-style chunk-context prepending are in place (`scripts/contextualize.py`) but the corpus is not yet contextualized — Tier 1 ITPM rate-limited the one-shot run. Production path is the Anthropic Batch API.
 - **Fine-tune the reranker on financial-domain pairs.** The cross-encoder's logit distribution skews negative for natural-language questions against passage-style chunks; a domain-tuned reranker would let the abstention threshold tighten without re-introducing false abstentions.
-- **Forward-looking-statement classifier at ingestion.** Currently the LLM is prompted to label "Management guided…"; a FinBERT-class classifier at ingestion would tag chunks with `statement_type: reported | guidance | risk_factor` and remove the inference burden from generation.
+- **Ingestion-time forward-looking-statement tagger.** The runtime prompt-level guard at generation already prevents historical actuals from being presented as guidance; complementing it with a FinBERT-class tagger that classifies chunks as `reported | guidance | risk_factor` would move the signal from query-time inference into the index itself.
 - **Multi-pass chart faithfulness check.** A second vision call comparing extracted values against the chart image, flagging discrepancies before display.
 - **Multi-tenant access control.** Add a `tenant_id` column plus PostgreSQL row-level security policies; the pattern transfers cleanly to a managed vector store should the storage layer change later.
+
+## Highlighted Changes
+
+### 1. Intent classifier on conflict-language queries
+
+**Found.** The deterministic regex did not match conflict, discrepancy, or disagreement keywords; the example query ("Are there conflicting data points across documents on Digital Realty leverage?") routed to `latest` and version-group dedup hid the December DLR deck.
+
+**Changed.** `_COMPARISON_RE` now matches `conflict|discrepancy|disagree|inconsistent|contradict|mismatch`, and the LLM-side classifier carries an explicit `conflict` intent. The existing `find_conflicting_chunks` stage queries the `chunk_claims` table for same-`(company, metric)` pairs with differing values and injects mismatches into the LLM context.
+
+**Decided not to change.** A separate retrieval path that forces all versions on `conflict` intent. `comparison` already retains all versions and `find_conflicting_chunks` already surfaces cross-version disagreements; a parallel path would duplicate behavior.
+
+### 2. Metadata registry collisions on same-date documents
+
+**Found.** Both BXP files resolved to `report_date: 2025-12` and both PSA files to `2026-03`; version-group dedup could not distinguish them and downstream behavior was order-dependent.
+
+**Changed.** A `doc_subtype` column now sits in the version-group key (see Versioning) and is surfaced in the citation when retrieval collisions occur (see Conflicting Information).
+
+**Decided not to change.** Making `doc_type` itself more granular as suggested. That would conflate document type with subtype and break legitimate version chains within the same subtype — a Q4 2025 quarterly deck → Q1 2026 quarterly deck is a version chain worth honoring. The separate column preserves those chains.
+
+### 3. Retrieval ranks boilerplate above substantive on broad strategy queries
+
+**Found.** Broad strategy queries surfaced trademark / disclaimer / forward-looking-statement pages because BM25 token density on those pages was dominated by the company name.
+
+**Changed.** The `page_content_class` system (see Retrieval Approach) excludes the three non-substantive classes from BM25 while leaving dense retrieval unfiltered.
+
+**Decided not to change.** Skipping boilerplate chunks at ingestion entirely. Retention preserves the option to answer queries about disclosure wording or document structure; retrieval-stage filtering is the right place to enforce relevance.
+
+## Overall Changes
+
+Three review issues addressed: conflict-language queries route to `comparison`/`conflict` and retain all versions (DLR December deck no longer suppressed); same-date deck collisions (BXP Investor Day vs Quarterly, PSA Company Update vs Merger) disambiguated via `doc_subtype` and surfaced in citations; ingestion classifies each chunk as `substantive`/`boilerplate_legal`/`index_reference`/`cover_page`, with BM25 excluding the three non-substantive. Beyond review: contextualization threaded through the cross-encoder reranker, forward-looking integrity guard at generation, numeric-consistency check hardened, corpus-membership framing added.
 
 ## Run
 

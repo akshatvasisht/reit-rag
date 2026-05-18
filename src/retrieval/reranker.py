@@ -48,6 +48,34 @@ _registry: dict[tuple[str, str | None], CrossEncoder] = {}
 # tree" for the calibration procedure and the decision tree for future changes.
 RERANK_THRESHOLD: float = -5.0
 
+# Content types whose `chunk_text` is free-form prose emitted by the vision
+# model rather than text extracted from the document. The prose often omits
+# the company name and the word "chart" itself, depressing cross-encoder
+# scores on queries that use those tokens verbatim.
+_VISION_EXTRACTED_CONTENT_TYPES = {"chart_description", "chart_context"}
+
+
+def _passage_for_rerank(rc: RetrievedChunk) -> str:
+    """Return the passage text passed to the cross-encoder for *rc*.
+
+    Prefers ``contextualized_text`` when present and non-whitespace, else
+    falls back to ``chunk_text``. For vision-extracted chunks
+    (``chart_description`` / ``chart_context``) prepends a short structured
+    marker so the cross-encoder has a lexical handle on entity and
+    provenance.
+    """
+    chunk = rc.chunk
+    base = (
+        chunk.contextualized_text
+        if chunk.contextualized_text and chunk.contextualized_text.strip()
+        else chunk.chunk_text
+    )
+    if chunk.content_type in _VISION_EXTRACTED_CONTENT_TYPES:
+        page_suffix = f", p.{chunk.page_number}" if chunk.page_number else ""
+        prefix = f"Chart from {chunk.company} ({chunk.doc_type}{page_suffix}): "
+        return prefix + base
+    return base
+
 
 def _get_cross_encoder() -> CrossEncoder:
     """Return the reranker singleton, loading it on first use."""
@@ -100,7 +128,7 @@ def rerank_with_model(
         return []
 
     effective_top_n = min(top_n, len(candidates))
-    pairs: list[tuple[str, str]] = [(query, rc.chunk.contextualized_text or rc.chunk.chunk_text) for rc in candidates]
+    pairs: list[tuple[str, str]] = [(query, _passage_for_rerank(rc)) for rc in candidates]
 
     model = _get_registry_encoder(model_name, revision)
     raw_scores = model.predict(cast(Any, pairs))
@@ -157,7 +185,7 @@ def rerank(
             len(candidates),
         )
 
-    pairs: list[tuple[str, str]] = [(query, rc.chunk.contextualized_text or rc.chunk.chunk_text) for rc in candidates]
+    pairs: list[tuple[str, str]] = [(query, _passage_for_rerank(rc)) for rc in candidates]
 
     model = _get_cross_encoder()
     # predict() can return ndarray or tensor depending on backend/config.

@@ -85,11 +85,9 @@ class TestWriteChunksInsertedCount:
         doc_id = write_document(real_conn, doc)
         chunks = [_make_chunk(doc_id, page=i) for i in range(1, 4)]
 
-        # First run — inserts 3
         first = write_chunks(real_conn, chunks)
         assert first == 3
 
-        # Second run with identical chunk objects (same UUIDs) — all conflict
         second = write_chunks(real_conn, chunks)
         assert second == 0, (
             f"Expected 0 on duplicate insert, got {second}; "
@@ -111,7 +109,6 @@ class TestWriteChunksInsertedCount:
         old_chunks = [_make_chunk(doc_id, page=i) for i in range(1, 3)]
         write_chunks(real_conn, old_chunks)  # insert 2
 
-        # Mix: 2 old + 1 new
         new_chunk = _make_chunk(doc_id, page=99)
         mixed = old_chunks + [new_chunk]
         count = write_chunks(real_conn, mixed)
@@ -140,7 +137,6 @@ class TestWriteDocumentIdempotency:
         doc = _make_doc_meta()
         first_id = write_document(real_conn, doc)
 
-        # Build a second DocumentMeta with the same source_path but a different UUID.
         doc2 = _make_doc_meta(source_path=doc.source_path)
         second_id = write_document(real_conn, doc2)
 

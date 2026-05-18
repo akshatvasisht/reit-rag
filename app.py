@@ -24,8 +24,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # Confidence indicator thresholds.
 # ---------------------------------------------------------------------------
 
-# Legacy threshold kept for any callers that compare raw logit scores.
-CONFIDENCE_HIGH = 3.0
 CONFIDENCE_LOW = RERANK_THRESHOLD
 
 
@@ -181,7 +179,6 @@ with st.sidebar:
         if st.button(q, use_container_width=True, key=f"ex_{i}"):
             st.session_state["query"] = q
 
-# Initialise session state
 if "query" not in st.session_state:
     st.session_state["query"] = ""
 if "submitted_query" not in st.session_state:
@@ -213,14 +210,12 @@ if submitted_query:
     with status_placeholder.status("Retrieving and generating…", expanded=False) as status:
         st.write("Classifying query and searching the corpus…")
 
-        # Streaming removed: structured output guarantees schema-compliant typed responses, which is the correct tradeoff for a financial citation system.
         final_answer = answer_structured(submitted_query)
 
         status.update(label="Done", state="complete", expanded=False)
 
     st.session_state["last_answer"] = final_answer
 
-    # Clear the placeholder — the persistent block below renders the answer.
     answer_placeholder.empty()
     st.session_state["submitted_query"] = ""
 
@@ -234,19 +229,16 @@ if submitted_query:
 final_answer = st.session_state.get("last_answer")
 if final_answer is not None:
     with st.container(border=True):
-        # Answer text
         if final_answer.abstained:
             st.warning(final_answer.text)
         else:
             st.markdown(final_answer.text)
 
-        # Citation badges from the answer's claim objects
         if not final_answer.abstained and hasattr(final_answer, "citation_report"):
             report = final_answer.citation_report
         else:
             report = None
 
-        # Summary metrics (single place for diagnostics)
         retrieval_conf = final_answer.diagnostics.get("retrieval_confidence", 0.0)
         summary_left, summary_mid, summary_right, summary_last = st.columns(4)
         summary_left.metric("Intent", str(final_answer.intent))
@@ -256,7 +248,6 @@ if final_answer is not None:
         )
         summary_right.metric("Confidence", _confidence_label(retrieval_conf, final_answer.abstained))
 
-        # Confidence band caveats — shown inline below the metrics row.
         if not final_answer.abstained:
             _band = confidence_band(retrieval_conf)
             if _band == "medium":
@@ -279,7 +270,6 @@ if final_answer is not None:
         else:
             summary_last.metric("Citations", "n/a")
 
-        # Retrieval hops badge — shown when adaptive multi-hop ran.
         retrieval_hops = final_answer.diagnostics.get("retrieval_hops", 0)
         if retrieval_hops and retrieval_hops > 0:
             sub_queries = final_answer.diagnostics.get("sub_queries", [])
@@ -289,7 +279,6 @@ if final_answer is not None:
                     for i, sq in enumerate(sub_queries, start=1):
                         st.caption(f"{i}. {sq}")
 
-        # Value mismatch badge — shown only when numeric issues were detected.
         if report is not None and report.numeric_mismatches:
             st.error("⚠ Value mismatch detected")
             with st.expander("Value mismatch details"):

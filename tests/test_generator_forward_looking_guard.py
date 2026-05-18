@@ -1,14 +1,14 @@
-"""Tests for 2d (forward-looking integrity guard) and 2k (corpus-membership framing).
+"""Tests for the forward-looking integrity guard and corpus-membership framing.
 
 probe_id: bxp-morn-adv-2 (2d anchor), xdoc-std-5/xdoc-adv-6/xdoc-std-4 (2k anchors).
 
 Test design:
 - All tests mock retrieve() and _generate_structured() so no DB or API access.
-- 2d tests verify the system prompt injected into _generate_structured carries
-  forward-looking-absent framing when the query is guidance-intent and chunks
+- Forward-looking guard tests verify the system prompt injected into _generate_structured
+  carries forward-looking-absent framing when the query is guidance-intent and chunks
   lack forward-looking language for the metric.
-- 2k tests verify the system prompt informs the LLM about corpus companies so
-  it can distinguish "not retrieved" from "not in corpus".
+- Corpus-membership tests verify the system prompt informs the LLM about corpus companies
+  so it can distinguish "not retrieved" from "not in corpus".
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def _make_sa(
 
 
 # ---------------------------------------------------------------------------
-# 2d — Forward-looking intent detection (unit tests on the guard function)
+# Forward-looking intent detection (unit tests on the guard function)
 # ---------------------------------------------------------------------------
 
 
@@ -144,7 +144,7 @@ def test_detect_forward_looking_intent_negative_occupancy_query() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2d — chunks_have_forward_looking_support (unit tests)
+# chunks_have_forward_looking_support (unit tests)
 # ---------------------------------------------------------------------------
 
 
@@ -210,7 +210,6 @@ def test_system_prompt_gets_fl_injection_when_query_is_guidance_and_chunks_lack_
     only reported actuals. The system prompt passed to the LLM must contain the
     forward-looking-absent instruction.
     """
-    # Chunk with only reported actual — no guidance language
     ctx = [_make_chunk(text="BXP reported FFO of $7.10 per share for full-year 2025.")]
     retrieval = _make_retrieval(ctx, query="What is BXP's 2025 FFO guidance?")
     sa = _make_sa(prose="BXP's guidance was not explicitly stated.")
@@ -242,8 +241,8 @@ def test_no_fl_injection_when_chunks_have_guidance_language(monkeypatch) -> None
     """When chunks DO contain guidance language, the FL-absent instruction must NOT
     appear in the system prompt passed to the LLM.
 
-    The corpus-aware prompt is always passed (2k fix), but the FL-absent block
-    (2d fix) must be absent when chunks already contain forward-looking language.
+    The corpus-aware prompt is always passed, but the forward-looking-absent block
+    must be absent when chunks already contain forward-looking language.
     """
     from src.generation.generator import _FL_ABSENT_INSTRUCTION
 
@@ -267,8 +266,8 @@ def test_no_fl_injection_when_chunks_have_guidance_language(monkeypatch) -> None
 
     generator.answer("What is BXP's 2026 FFO guidance?")
 
-    # The corpus-aware prompt is always passed (2k); but the FL-absent block
-    # (2d) must NOT be injected since chunks have forward-looking language.
+    # The corpus-aware prompt is always passed; but the forward-looking-absent block
+    # must NOT be injected since chunks have forward-looking language.
     assert len(captured_system) == 1, "Corpus-aware system prompt must always be passed"
     assert "FORWARD-LOOKING GUARD" not in captured_system[0], \
         "FL-absent instruction must NOT be injected when chunks have FL support"
@@ -302,14 +301,13 @@ def test_no_fl_injection_for_non_forward_looking_query(monkeypatch) -> None:
 
     generator.answer("What was BXP's 2025 FFO?")
 
-    # Corpus-aware prompt is always passed (2k); FL-absent block (2d) must NOT fire.
     assert len(captured_system) == 1, "Corpus-aware system prompt must always be passed"
     assert "FORWARD-LOOKING GUARD" not in captured_system[0], \
         "Guard must NOT fire on non-forward-looking query — over-refusal risk"
 
 
 # ---------------------------------------------------------------------------
-# 2d — RI dividend yield anchor case (§3 anchor)
+# RI dividend yield anchor case (§3 anchor)
 # ---------------------------------------------------------------------------
 
 
@@ -357,11 +355,7 @@ def test_ri_dividend_yield_guidance_fires_guard(monkeypatch) -> None:
 
     generator.answer("What is Realty Income's dividend yield guidance?")
 
-    # Guard fired: a system prompt override was applied (i.e. the
-    # FL-absent instruction was appended).
     assert len(captured_system) == 1, "Guard must fire for RI dividend yield guidance query"
-    # And the override actually contains the forward-looking guard text,
-    # not just any non-empty override.
     injected = captured_system[0].lower()
     assert (
         "not disclose" in injected
@@ -369,12 +363,11 @@ def test_ri_dividend_yield_guidance_fires_guard(monkeypatch) -> None:
         or "forward-looking" in injected
         or "guidance" in injected
     ), f"Injected system prompt should contain FL-absent instruction; got: {captured_system[0][:300]}"
-    # The classifier signal was propagated through to the generation call.
     assert captured_forward_looking == [True]
 
 
 # ---------------------------------------------------------------------------
-# 2k — Corpus-company list in system prompt
+# Corpus-company list in system prompt
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +387,7 @@ def test_system_prompt_contains_corpus_companies() -> None:
     # Every corpus company must appear in the prompt
     for company in corpus_companies:
         assert company in prompt, \
-            f"Corpus company '{company}' must appear in system prompt for 2k fix"
+            f"Corpus company '{company}' must appear in system prompt"
 
 
 def test_system_prompt_contains_retrieval_miss_framing() -> None:
@@ -412,7 +405,7 @@ def test_system_prompt_contains_retrieval_miss_framing() -> None:
 
 def test_answer_uses_corpus_aware_prompt_for_generation(monkeypatch) -> None:
     """When answer() calls _generate_structured, the system_prompt_override passed
-    must include the corpus company list (2k fix).
+    must include the corpus company list.
 
     Anchor: xdoc-adv-6 — RI was in companies_filter but LLM said 'RI not in corpus'.
     We verify the system prompt injected by answer() into _generate_structured

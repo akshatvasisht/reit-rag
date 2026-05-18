@@ -95,7 +95,7 @@ def _strip_approx(value: str) -> tuple[str, bool]:
 # ---------------------------------------------------------------------------
 
 # Matches `[Company, Doc Type, Month Year, p.N]` and also the extended
-# `[Company, Doc Type (Subtype), Month Year, p.N]` format introduced by 2b.
+# `[Company, Doc Type (Subtype), Month Year, p.N]` format.
 # The doc_type group is non-greedy and stops at `,` or `]`; the optional
 # `( Subtype )` suffix is captured separately so older-format citations still
 # parse.
@@ -770,7 +770,6 @@ def check_numeric_consistency(
         raw_matches = FINANCIAL_NUMBER_RE.findall(chunk_text)
         chunk_values = [m.strip() for m in raw_matches]
 
-        # Split composite value strings into atomic sub-values (fix 2a).
         atoms = _split_composite_value(claim.value)
 
         # A claim passes if every atom that carries financial-numeric meaning
@@ -855,8 +854,8 @@ def _normalize_date(raw: str) -> str:
 def _normalize_doc_type(raw: str) -> str:
     """Normalize doc-type strings for robust equality checks.
 
-    Strips the optional "(Subtype)" parenthetical introduced by 2b citation
-    disambiguation so a citation like
+    Strips the optional "(Subtype)" parenthetical from the citation string so a
+    citation like
     "Investor Presentation (Company Update)" matches a chunk whose
     `doc_type='investor_presentation'`. Subtype matching, when needed, is
     handled separately via the doc_subtype column on the chunk; the

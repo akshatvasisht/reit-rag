@@ -38,7 +38,6 @@ from src.versioning.classifier import TemporalIntent
 
 logger = logging.getLogger(__name__)
 
-# Keep the model identifier centralized for straightforward updates.
 MODEL_ID = "claude-sonnet-4-6"
 # Synthesis queries (multi-company tables) routinely exceeded the 1000-token
 # ceiling, causing the model to stop_reason=max_tokens before emitting
@@ -253,9 +252,9 @@ def _generate_structured(
     output_config or native JSON-mode extension.  The model is forced to call
     the submit_answer tool, whose input is already a parsed dict.
 
-    ``system_prompt_override``: when provided (2d FL guard + 2k corpus framing),
-    replaces the default system prompt. The answer() / answer_structured() callers
-    always build the corpus-aware prompt and pass it here.
+    ``system_prompt_override``: when provided, replaces the default system prompt.
+    The answer() / answer_structured() callers always build the corpus-aware prompt
+    and pass it here.
     """
     try:
         client = _get_client()

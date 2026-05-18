@@ -505,7 +505,7 @@ def print_summary() -> None:
         print(f"  {cat:30s} {n}")
     print()
     for q in EVALUATION_SET:
-        flag = "🔴" if q.expect_hard_abstain else ("📊" if q.expect_chart_chunk_in_context else "  ")
+        flag = "[abstain]" if q.expect_hard_abstain else ("[chart]" if q.expect_chart_chunk_in_context else "       ")
         print(f"  {flag} [{q.id}] {q.category:24s} {q.query}")
 
 

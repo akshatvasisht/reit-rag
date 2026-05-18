@@ -131,7 +131,6 @@ def test_duplicate_subquery_exact_match_skips_second_hop() -> None:
     initial = _make_initial_result(query=original_query)
     conn = MagicMock()
 
-    # Haiku proposes the exact same string as the original query on hop 1.
     responses = [
         _make_tool_use_response(original_query),  # duplicate — should be skipped
         _make_end_turn_response(),
@@ -148,12 +147,10 @@ def test_duplicate_subquery_exact_match_skips_second_hop() -> None:
         with patch("src.retrieval.pipeline._retrieve_core", side_effect=_mock_retrieve_core):
             result, sub_queries = adaptive_retrieve(original_query, initial, conn)
 
-    # The sub-query that duplicates the original must not fire a retrieval pass.
     assert retrieve_core_calls == [], (
         "Duplicate sub-query should not fire _retrieve_core, "
         f"but got calls: {retrieve_core_calls}"
     )
-    # The duplicate must not appear in sub_queries either.
     assert sub_queries == [], f"Expected no sub_queries, got: {sub_queries}"
 
 
@@ -165,7 +162,6 @@ def test_duplicate_subquery_case_insensitive_skips_hop() -> None:
     initial = _make_initial_result(query=original_query)
     conn = MagicMock()
 
-    # Haiku returns the same query in different case.
     duplicate_different_case = "simon property group Mall Property TAX expense"
     responses = [
         _make_tool_use_response(duplicate_different_case),
@@ -195,7 +191,6 @@ def test_duplicate_subquery_whitespace_collapsed_skips_hop() -> None:
     initial = _make_initial_result(query=original_query)
     conn = MagicMock()
 
-    # Same words but extra internal whitespace.
     duplicate_extra_spaces = "BXP  total  in-service  portfolio  square  footage  June  30  2025"
     responses = [
         _make_tool_use_response(duplicate_extra_spaces),
@@ -269,7 +264,6 @@ def test_different_subquery_fires_hop() -> None:
     initial = _make_initial_result(query=original_query)
     conn = MagicMock()
 
-    # A legitimately different sub-query: different vocabulary, different angle.
     different_sub_query = "Public Storage PSA leverage ratio year end 2025"
     responses = [
         _make_tool_use_response(different_sub_query),
@@ -296,7 +290,6 @@ def test_different_subquery_fires_hop() -> None:
         with patch("src.retrieval.pipeline._retrieve_core", side_effect=_mock_retrieve_core):
             result, sub_queries = adaptive_retrieve(original_query, initial, conn)
 
-    # The different sub-query MUST fire.
     assert retrieve_core_calls == [different_sub_query], (
         f"Different sub-query should fire _retrieve_core, got: {retrieve_core_calls}"
     )
@@ -357,13 +350,11 @@ def test_get_haiku_client_returns_singleton() -> None:
 
     fake_instance = MagicMock(name="FakeAnthropic")
 
-    # Patch Anthropic constructor inside the module after reload.
     with patch("src.retrieval.adaptive.Anthropic", return_value=fake_instance) as mock_cls:
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test-key"}):
             client_1 = adaptive_mod._get_haiku_client()
             client_2 = adaptive_mod._get_haiku_client()
 
-    # The constructor should be called exactly once (singleton).
     assert mock_cls.call_count == 1, (
         f"Anthropic() was called {mock_cls.call_count} times; expected 1 (singleton)"
     )

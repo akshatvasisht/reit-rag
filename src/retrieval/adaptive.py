@@ -108,13 +108,10 @@ def _is_duplicate_query(candidate: str, prior_queries: list[str]) -> bool:
       1. Their whitespace-collapsed, lowercased strings are identical (exact match), OR
       2. The Jaccard token overlap between candidate and any prior query is >= 90%.
 
-    This is the safety-net guard for 2j — the Haiku prompt already instructs a
+    This is the safety-net guard — the Haiku prompt already instructs a
     different angle, but this guard catches any slippage.  Only trivially-identical
     and near-identical queries are rejected; legitimately similar formulations with
     meaningfully different vocabulary pass through.
-
-    Evidence: bxp-morn-basic-1, xdoc-basic-1, xdoc-adv-6 all show identical
-    sub_queries across hops, adding zero retrieval coverage.
     """
     def _normalise(text: str) -> str:
         return " ".join(text.lower().split())
@@ -126,10 +123,8 @@ def _is_duplicate_query(candidate: str, prior_queries: list[str]) -> bool:
     candidate_tokens = _tokens(candidate)
 
     for prior in prior_queries:
-        # Exact match after normalisation.
         if candidate_norm == _normalise(prior):
             return True
-        # Token-overlap guard (Jaccard index >= threshold).
         prior_tokens = _tokens(prior)
         union = candidate_tokens | prior_tokens
         if union:  # guard against empty-string edge case
@@ -250,7 +245,6 @@ def adaptive_retrieve(
             logger.info("Adaptive orchestrator: evidence sufficient after %d hop(s)", hop)
             break
 
-        # Extract the retrieve_more tool call.
         tool_block = next(
             (b for b in response.content if getattr(b, "type", None) == "tool_use"),
             None,
@@ -302,7 +296,6 @@ def adaptive_retrieve(
                 "skipped": "duplicate_guard",
             })
             break
-        # ----------------------------------------
 
         _all_prior_queries.append(sub_query)
         sub_queries.append(sub_query)
@@ -324,7 +317,6 @@ def adaptive_retrieve(
             intent=initial_result.intent,
         )
 
-        # Merge new contexts, deduping by chunk ID.
         new_count = 0
         for rc in hop_result.contexts:
             if rc.chunk.id not in seen_chunk_ids:
@@ -333,7 +325,6 @@ def adaptive_retrieve(
                 new_count += 1
         logger.info("Adaptive hop %d: +%d new chunks merged", hop + 1, new_count)
 
-    # Apply deterministic sort over the merged context list.
     merged_contexts_sorted = sorted(
         merged_contexts,
         key=lambda rc: (rc.chunk.company, rc.chunk.report_date, rc.chunk.page_number or 0),

@@ -1,4 +1,4 @@
-"""Tests for the soft-refusal grading hook in scripts/evaluate.py (fix 2e).
+"""Tests for the soft-refusal grading hook in scripts/evaluate.py.
 
 Verifies that when EvaluationQuery.expect_soft_refusal=True, the _grade()
 function:
@@ -190,6 +190,5 @@ def test_soft_refusal_check_skipped_when_not_expected():
         contexts=[RetrievedChunk(chunk=_make_chunk(), rerank_score=0.9)],
     )
     result = _grade(gq, a)
-    # The soft_refusal check must not appear in either pass or fail lists.
     assert "soft_refusal" not in result.auto_pass_reasons
     assert "expected_soft_refusal_but_answered" not in result.auto_fail_reasons

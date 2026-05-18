@@ -141,7 +141,7 @@ class RetrievedChunk:
     vector_rank: Optional[int] = None
     fused_score: Optional[float] = None
     rerank_score: Optional[float] = None
-    # Provenance fields (2g) — indicate how this chunk arrived in the context.
+    # Provenance fields — indicate how this chunk arrived in the context.
     # Values: "reranked" | "parent_expanded" | "sibling_expanded" |
     #         "conflict_injected" | "table_pair_expanded"
     retrieval_stage: Optional[str] = None

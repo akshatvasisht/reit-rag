@@ -83,10 +83,8 @@ def test_refresh_db_error_emits_warning(caplog: pytest.LogCaptureFixture) -> Non
         ):
             reg.refresh()
 
-    # Fallback behavior: entries unchanged (seed-shape)
     assert reg.entries == original
 
-    # Observability behavior: warning was emitted
     warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warning_records, "Expected at least one WARNING log record"
     assert "corpus_registry DB refresh failed" in warning_records[0].message
@@ -156,7 +154,6 @@ def test_reset_for_tests_restores_module_level_list_to_seed() -> None:
     """_reset_for_tests() must restore the module-level CORPUS_REGISTRY to the seed."""
     import src.corpus_registry as reg_module
 
-    # Pollute the module-level list.
     reg_module.CORPUS_REGISTRY.clear()
     reg_module.CORPUS_REGISTRY.append({"company": "Polluted REIT"})
 

@@ -612,10 +612,8 @@ def render_markdown(
         baseline_rows = reranker_ablation.get("reranker_baseline", [])
         alt_rows = reranker_ablation.get("reranker_alternative", [])
 
-        # Detect load failure from sentinel config name.
         alt_error: str | None = None
         if alt_rows and alt_rows[0].config_name.startswith("reranker_alternative[LOAD_ERROR:"):
-            # Extract error message from sentinel config_name.
             alt_error = alt_rows[0].config_name[len("reranker_alternative[LOAD_ERROR: "):-1]
 
         # Derive the alternative model name from the first non-error row, or
@@ -623,12 +621,10 @@ def render_markdown(
         if alt_error is None and alt_rows:
             alt_label = alt_rows[0].config_name
         elif alt_rows:
-            # sentinel — display as unknown
             alt_label = "alternative (failed)"
         else:
             alt_label = "alternative"
 
-        # Summary table.
         baseline_recall = _compute_recall_at_k(baseline_rows)
         baseline_mrr = _compute_mrr_at_k(baseline_rows)
         lines.append("| Reranker | Recall@5 | MRR@3 |")
@@ -653,7 +649,6 @@ def render_markdown(
         lines.append("")
 
         if alt_error is None and baseline_rows and alt_rows:
-            # Per-query breakdown.
             lines.append("### Per-query breakdown")
             lines.append("")
             lines.append("| Query ID | Baseline Recall@5 | Baseline MRR@3 | Alt Recall@5 | Alt MRR@3 |")
@@ -767,7 +762,6 @@ def main() -> None:
         Path(args.out).write_text(report)
         logger.warning("Wrote report to %s (%d bytes)", args.out, len(report))
     else:
-        # Concise stdout summary
         print()
         print(f"EVAL: {pass_n}/{len(evaluation)} auto-pass")
         print()

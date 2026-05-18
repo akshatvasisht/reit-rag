@@ -167,7 +167,6 @@ def test_adaptive_retrieve_one_hop_merges_new_contexts() -> None:
     initial_rc = _make_rc(initial_chunk)
     initial = _make_initial_result(contexts=[initial_rc])
 
-    # The hop retrieval returns one new chunk and one duplicate.
     new_chunk = _make_chunk(company="Digital Realty", page_number=10, chunk_text="Covenant: <5.5x")
     dup_chunk = initial_chunk  # same object → same UUID
     hop_contexts = [_make_rc(new_chunk, score=1.5), _make_rc(dup_chunk, score=1.2)]
@@ -200,7 +199,6 @@ def test_adaptive_retrieve_one_hop_merges_new_contexts() -> None:
     chunk_ids = {rc.chunk.id for rc in result.contexts}
     assert initial_chunk.id in chunk_ids
     assert new_chunk.id in chunk_ids
-    # No duplicate: initial_chunk appears once only.
     assert len([rc for rc in result.contexts if rc.chunk.id == initial_chunk.id]) == 1
 
 
