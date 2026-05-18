@@ -66,9 +66,6 @@ class EvaluationQuery:
     # When set, the harness counts distinct companies in retrieved context and
     # fails the query if fewer than this many companies are represented.
     expect_min_companies_in_context: int | None = None
-    # When set, the harness runs check_ooc_entity_attribution and fails the
-    # query if any detected issue names this entity.
-    expect_no_numerical_attribution_to: str | None = None
     # When True, the harness verifies the structured answer sets forward_looking=True.
     expect_forward_looking: bool = False
     # When True, intent mismatch is a hard FAIL. When False (default), an
@@ -250,7 +247,6 @@ EVALUATION_SET: list[EvaluationQuery] = [
         expected_intent="latest",
         expected_company=None,
         expect_hard_abstain=True,
-        expect_no_numerical_attribution_to="Equinix",
         human_eval_rubric=(
             "Equinix is not in our corpus. Must abstain (no Equinix sources "
             "to retrieve). Refusal text should make clear which companies "

@@ -29,7 +29,6 @@ from typing import Optional
 # Allow running as a script without -m
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.generation.citation_check import check_ooc_entity_attribution
 from src.generation.generator import Answer, answer
 from src.corpus_registry import CORPUS_REGISTRY
 from src.retrieval.pipeline import RetrievalResult, confidence_band, retrieve
@@ -62,7 +61,6 @@ class EvaluationResult:
     chart_in_context: bool | None
     both_dlr_versions: bool | None
     citation_supported_ratio: float | None
-    ooc_attribution_check: bool | None
     min_companies_check: bool | None
     forward_looking_check: bool | None
     soft_refusal_check: bool | None
@@ -166,30 +164,6 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
         distinct_companies = len({rc.chunk.company for rc in a.contexts})
         min_companies_check = distinct_companies >= gq.expect_min_companies_in_context
 
-    ooc_attribution_check = None
-    if gq.expect_no_numerical_attribution_to is not None:
-        corpus_companies = sorted({e["company"] for e in CORPUS_REGISTRY})
-        # Reconstruct a minimal StructuredAnswer-like object from the Answer to
-        # run the check. The Answer carries ooc_attribution_issues directly when
-        # populated by the generator; fall back to re-running the check when the
-        # answer was produced by the legacy `answer()` path which does not yet
-        # attach them.
-        ooc_issues_on_answer = getattr(a, "ooc_attribution_issues", [])
-        if ooc_issues_on_answer:
-            relevant = [
-                i for i in ooc_issues_on_answer
-                if i.get("ooc_entity", "").lower()
-                == gq.expect_no_numerical_attribution_to.lower()
-            ]
-            ooc_attribution_check = len(relevant) == 0
-        else:
-            # Re-derive from the structured answer fields embedded in Answer.
-            # The `answer()` path sets ooc_attribution_issues on the Answer; if
-            # the list is empty it may mean no issues were found OR the check
-            # wasn't run. We treat an empty list here as a pass (the abstention
-            # check already catches the hard-abstain case).
-            ooc_attribution_check = True
-
     forward_looking_check = None
     if gq.expect_forward_looking:
         # Only meaningful when the model produced an answer (not an abstention).
@@ -230,7 +204,6 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
         ("abstain", abstain_match),
         ("chart_in_context", chart_in_context),
         ("both_dlr_versions", both_dlr_versions),
-        ("ooc_attribution_check", ooc_attribution_check),
         ("min_companies_check", min_companies_check),
         ("forward_looking_check", forward_looking_check),
         ("soft_refusal", soft_refusal_check),
@@ -262,7 +235,6 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
         chart_in_context=chart_in_context,
         both_dlr_versions=both_dlr_versions,
         citation_supported_ratio=cit_ratio,
-        ooc_attribution_check=ooc_attribution_check,
         min_companies_check=min_companies_check,
         forward_looking_check=forward_looking_check,
         soft_refusal_check=soft_refusal_check,
@@ -700,8 +672,6 @@ def render_markdown(
             lines.append(f"- Both DLR versions retrieved: {r.both_dlr_versions}")
         if r.citation_supported_ratio is not None:
             lines.append(f"- Citation faithfulness: {r.citation_supported_ratio:.0%}")
-        if r.ooc_attribution_check is not None:
-            lines.append(f"- OOC attribution check: {_fmt_check(r.ooc_attribution_check)}")
         if r.min_companies_check is not None:
             lines.append(f"- Min companies in context: {_fmt_check(r.min_companies_check)}")
         if r.forward_looking_check is not None:

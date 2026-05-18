@@ -24,7 +24,6 @@ from src.generation.citation_check import (
     CitationReport,
     check_citations,
     check_numeric_consistency,
-    check_ooc_entity_attribution,
 )
 from src.generation.prompts import (
     ANSWER_JSON_SCHEMA,
@@ -215,7 +214,6 @@ class Answer:
     intent: str | None = None
     diagnostics: dict = field(default_factory=dict)
     citation_report: CitationReport | None = None
-    ooc_attribution_issues: list[dict] = field(default_factory=list)
     # The typed StructuredAnswer produced during generation, if available.
     # Present on every answered path so callers can inspect schema-validated
     # fields (e.g. forward_looking) without resorting to getattr hacks.
@@ -299,13 +297,6 @@ def answer(query: str) -> Answer:
     report.numeric_mismatches = numeric_issues
     structured.numeric_consistency_report = numeric_issues
 
-    ooc_issues: list[dict] = []
-    if not structured.abstain:
-        ooc_issues = check_ooc_entity_attribution(structured, query, corpus_companies)
-        structured.ooc_attribution_issues = ooc_issues
-        if ooc_issues:
-            logger.info("OOC entity attribution issues: %d", len(ooc_issues))
-
     structured.retrieval_hops = retrieval.diagnostics.get("retrieval_hops", 0)
     structured.sub_queries_fired = list(retrieval.diagnostics.get("sub_queries", []))
     structured.retrieval_confidence = retrieval.retrieval_confidence
@@ -321,7 +312,6 @@ def answer(query: str) -> Answer:
         intent=retrieval.intent,
         diagnostics=diagnostics,
         citation_report=report,
-        ooc_attribution_issues=ooc_issues,
         structured=structured,
     )
 
@@ -477,13 +467,6 @@ def answer_structured(query: str) -> Answer:
     report.numeric_mismatches = numeric_issues
     structured.numeric_consistency_report = numeric_issues
 
-    ooc_issues_structured: list[dict] = []
-    if not structured.abstain:
-        ooc_issues_structured = check_ooc_entity_attribution(structured, query, corpus_companies)
-        structured.ooc_attribution_issues = ooc_issues_structured
-        if ooc_issues_structured:
-            logger.info("OOC entity attribution issues: %d", len(ooc_issues_structured))
-
     structured.retrieval_hops = retrieval.diagnostics.get("retrieval_hops", 0)
     structured.sub_queries_fired = list(retrieval.diagnostics.get("sub_queries", []))
     structured.retrieval_confidence = retrieval.retrieval_confidence
@@ -499,7 +482,6 @@ def answer_structured(query: str) -> Answer:
         intent=retrieval.intent,
         diagnostics=diagnostics_structured,
         citation_report=report,
-        ooc_attribution_issues=ooc_issues_structured,
         structured=structured,
     )
 

@@ -417,7 +417,6 @@ def test_answer_structured_populates_hop_diagnostics(monkeypatch) -> None:
         supported=0, total=0, faithfulness_ratio=1.0, unsupported=[], numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda s, c: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda s, q, cc: [])
 
     generator.answer_structured("multi-hop test query")
 

@@ -46,7 +46,6 @@ class _FakeAnswer:
     contexts: list = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
     citation_report: Optional[CitationReport] = None
-    ooc_attribution_issues: list = field(default_factory=list)
     structured: Optional[object] = None
 
 

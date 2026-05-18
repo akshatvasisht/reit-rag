@@ -228,7 +228,6 @@ def test_system_prompt_gets_fl_injection_when_query_is_guidance_and_chunks_lack_
         supported=0, total=0, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     result = generator.answer("What is BXP's 2025 FFO guidance?")
 
@@ -265,7 +264,6 @@ def test_no_fl_injection_when_chunks_have_guidance_language(monkeypatch) -> None
         supported=1, total=1, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     generator.answer("What is BXP's 2026 FFO guidance?")
 
@@ -301,7 +299,6 @@ def test_no_fl_injection_for_non_forward_looking_query(monkeypatch) -> None:
         supported=1, total=1, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     generator.answer("What was BXP's 2025 FFO?")
 
@@ -350,7 +347,6 @@ def test_ri_dividend_yield_guidance_fires_guard(monkeypatch) -> None:
         supported=0, total=0, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     generator.answer("What is Realty Income's dividend yield guidance?")
 
@@ -426,7 +422,6 @@ def test_answer_uses_corpus_aware_prompt_for_generation(monkeypatch) -> None:
         supported=1, total=1, faithfulness_ratio=1.0, numeric_mismatches=[]
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
-    monkeypatch.setattr(generator, "check_ooc_entity_attribution", lambda *a, **k: [])
 
     generator.answer("What is BXP leverage?")
 

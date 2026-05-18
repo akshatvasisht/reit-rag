@@ -278,29 +278,6 @@ if final_answer is not None:
                     for i, sq in enumerate(sub_queries, start=1):
                         st.caption(f"{i}. {sq}")
 
-        # Out-of-corpus attribution badge — shown when an answer attributes a
-        # value to an entity not in the indexed corpus. More severe than the
-        # numeric mismatch badge; rendered in its own row above it.
-        ooc_issues = getattr(final_answer, "ooc_attribution_issues", [])
-        if ooc_issues:
-            st.error("⚠ Out-of-corpus attribution")
-            with st.expander("Out-of-corpus attribution details"):
-                st.caption(
-                    "The following claims attribute specific figures to companies "
-                    "that are not in the indexed document corpus. Treat these "
-                    "figures with extreme caution."
-                )
-                for issue in ooc_issues:
-                    ooc_entity = issue.get("ooc_entity", "unknown entity")
-                    citing_company = issue.get("citing_company", "unknown source")
-                    st.markdown(
-                        f"This answer attributes a specific figure to **{ooc_entity}**, "
-                        f"which is not in the indexed corpus. The figure was found in "
-                        f"**{citing_company}**'s document as an incidental mention. "
-                        f"Treat this figure with extreme caution."
-                    )
-                    st.divider()
-
         # Value mismatch badge — shown only when numeric issues were detected.
         if report is not None and report.numeric_mismatches:
             st.error("⚠ Value mismatch detected")

@@ -44,9 +44,6 @@ class StructuredAnswer:
     # Per-claim numeric consistency issues surfaced after generation; empty list
     # means every cited value was verified in its source chunk.
     numeric_consistency_report: list[dict] = field(default_factory=list)
-    # Out-of-corpus entity attribution issues; empty list means no such pattern
-    # was detected in this answer.
-    ooc_attribution_issues: list[dict] = field(default_factory=list)
     # Number of additional retrieval passes performed beyond the initial one.
     retrieval_hops: int = 0
     # Sub-questions that triggered additional retrieval passes, in order fired.
