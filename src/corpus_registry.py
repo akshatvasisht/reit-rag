@@ -10,8 +10,11 @@ module reload or re-import is required.
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +202,12 @@ class CorpusRegistry:
         """
         try:
             new_entries = self._load_from_db()
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "corpus_registry DB refresh failed (%s: %s); using seed list",
+                type(exc).__name__,
+                exc,
+            )
             return
         self._entries.clear()
         self._entries.extend(new_entries)

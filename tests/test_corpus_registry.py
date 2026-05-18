@@ -71,6 +71,29 @@ def test_refresh_with_db_error_leaves_entries_unchanged() -> None:
     assert reg.entries == original
 
 
+def test_refresh_db_error_emits_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """refresh() must log a WARNING when _load_from_db raises, and still return seed-shape data."""
+    import logging
+
+    reg = CorpusRegistry()
+    original = list(reg.entries)
+    with caplog.at_level(logging.WARNING, logger="src.corpus_registry"):
+        with patch.object(
+            CorpusRegistry, "_load_from_db", side_effect=RuntimeError("connection refused")
+        ):
+            reg.refresh()
+
+    # Fallback behavior: entries unchanged (seed-shape)
+    assert reg.entries == original
+
+    # Observability behavior: warning was emitted
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning_records, "Expected at least one WARNING log record"
+    assert "corpus_registry DB refresh failed" in warning_records[0].message
+    assert "RuntimeError" in warning_records[0].message
+    assert "connection refused" in warning_records[0].message
+
+
 def test_refresh_with_mocked_db_updates_entries() -> None:
     """refresh() when _load_from_db succeeds must replace entries with new rows."""
     new_rows: list[dict[str, Any]] = [

@@ -62,9 +62,10 @@ def check_contextual_activation() -> None:
 
     Called explicitly by application entrypoints (Streamlit app, ingestion
     scripts) rather than at module import time so importing this module
-    does not require DB availability. Any failure (missing DB, missing
-    table, missing env var) is silently swallowed so application startup
-    never raises from this check.
+    does not require DB availability. Resilient by design: any failure
+    (missing DB, missing table, missing env var) is caught so application
+    startup never raises from this check — but the exception is now
+    logged at WARNING so operators can see when the check is failing.
     """
     try:
         from src.db import connect as _connect  # noqa: PLC0415
@@ -88,8 +89,12 @@ def check_contextual_activation() -> None:
                 "Run scripts/contextualize.py --embed to activate.",
                 pct,
             )
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Contextual-activation startup check failed (%s: %s); "
+            "proceeding without the activation signal.",
+            type(exc).__name__, exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +797,17 @@ def retrieve(
     # All-company synthesis: run a separate retrieval pass per corpus company so
     # every company gets equal representation rather than relying on a global
     # top-K that might be dominated by one company's peer-comparison tables.
+    # The per-issuer floor (enforce_per_issuer_floor) fires only on this branch.
+    # For other intents the floor is intentionally not applied:
+    #   - latest / conflict / comparison on a single issuer: extract_companies
+    #     returns one company; the companies_filter constrains BM25 and vector
+    #     to that issuer's chunks so cross-issuer collapse is not a risk.
+    #   - cross-issuer comparison (multiple companies named in the query):
+    #     extract_companies returns the named set and companies_filter passes
+    #     it to BM25 and vector, constraining the candidate pool. Within that
+    #     constrained pool the rerank generally maintains per-issuer
+    #     representation. Promote to per-issuer floor here if probes ever show
+    #     cross-issuer collapse on this branch.
     if intent == "all_company_synthesis":
         with connect() as conn:
             synthesis_result = retrieve_all_company_synthesis(

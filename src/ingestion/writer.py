@@ -21,10 +21,13 @@ logger = logging.getLogger(__name__)
 
 
 def write_document(conn: Connection, doc_meta: DocumentMeta) -> UUID:
-    """Insert (or upsert) a document row. Returns the document UUID.
+    """Insert a document row and return its UUID.
 
-    Idempotent on `source_path` — re-running ingestion on the same file returns
-    the existing UUID without duplicating the row.
+    Idempotent on `source_path` — when a row with the same source_path already
+    exists the INSERT is silently skipped and the existing document_id is
+    returned via a follow-up SELECT.  This avoids the silent metadata mutation
+    that DO UPDATE would perform and prevents a parallel-ingest race from
+    creating duplicate rows.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -33,14 +36,7 @@ def write_document(conn: Connection, doc_meta: DocumentMeta) -> UUID:
                 (id, company, ticker, doc_type, report_date, period_covered,
                  doc_version, source_path, doc_subtype)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (source_path) DO UPDATE
-              SET company = EXCLUDED.company,
-                  ticker = EXCLUDED.ticker,
-                  doc_type = EXCLUDED.doc_type,
-                  report_date = EXCLUDED.report_date,
-                  period_covered = EXCLUDED.period_covered,
-                  doc_version = EXCLUDED.doc_version,
-                  doc_subtype = EXCLUDED.doc_subtype
+            ON CONFLICT (source_path) DO NOTHING
             RETURNING id;
             """,
             (
@@ -56,9 +52,20 @@ def write_document(conn: Connection, doc_meta: DocumentMeta) -> UUID:
             ),
         )
         row = cur.fetchone()
-        if row is None:
-            raise RuntimeError("documents insert returned no row")
-        return row[0]
+        if row is not None:
+            # Fresh insert — RETURNING gave us the new id.
+            return row[0]
+        # Conflict: the source_path already exists; fetch the existing id.
+        cur.execute(
+            "SELECT id FROM documents WHERE source_path = %s",
+            (doc_meta.source_path,),
+        )
+        existing = cur.fetchone()
+        if existing is None:
+            raise RuntimeError(
+                f"documents insert conflict but no existing row for source_path={doc_meta.source_path!r}"
+            )
+        return existing[0]
 
 
 def write_chunks(conn: Connection, chunks: list[Chunk], batch_size: int = 100) -> int:
@@ -119,7 +126,7 @@ def write_chunks(conn: Connection, chunks: list[Chunk], batch_size: int = 100) -
                 """,
                 params,
             )
-            inserted += len(batch)
+            inserted += cur.rowcount
             logger.info("  Inserted %d / %d chunks", inserted, len(chunks))
 
     return inserted
