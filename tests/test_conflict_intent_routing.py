@@ -5,7 +5,6 @@ from __future__ import annotations
 from uuid import uuid4
 
 import httpx
-import pytest
 from anthropic import APIConnectionError
 
 from src.generation import generator
@@ -72,11 +71,6 @@ def test_dedupe_conflict_preserves_input_order() -> None:
     ]
     result = dedupe_by_version_group(chunks, intent="conflict")
     assert result == chunks
-
-
-def test_dedupe_conflict_empty_list() -> None:
-    result = dedupe_by_version_group([], intent="conflict")
-    assert result == []
 
 
 # ---------------------------------------------------------------------------

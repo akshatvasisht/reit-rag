@@ -6,9 +6,8 @@ Each test completes in well under 2 seconds.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from src.retrieval.vector import HNSW_EF_SEARCH, vector_search
 

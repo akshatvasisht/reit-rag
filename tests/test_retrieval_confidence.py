@@ -7,11 +7,9 @@ database or network access.  Each test completes well under 2 seconds.
 from __future__ import annotations
 
 import math
-from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import uuid4
 
-import pytest
 
 from src.models import Chunk, RetrievedChunk
 from src.retrieval.confidence import (
@@ -241,22 +239,11 @@ def test_band_low() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_chunk_row(chunk_id, doc_id, company: str = "Acme REIT") -> tuple:
-    return (
-        str(chunk_id), str(doc_id), None,
-        company, "ACR", "investor_presentation", "2026-03", "Q4 2025", "2026-03",
-        "Financials", 1, "text", "company_authored",
-        "Sample chunk text", False, 80,
-        "quarterly_investor_deck", "substantive",
-    )
-
-
 def test_retrieve_core_populates_confidence(monkeypatch) -> None:
     """_retrieve_core attaches retrieval_confidence to the RetrievalResult."""
     from src.retrieval import pipeline as pl
 
     chunk_id = uuid4()
-    doc_id = uuid4()
     rc1 = _make_rc(score=2.0, company="Acme REIT")
     rc1.chunk.id = chunk_id
     rc2 = _make_rc(score=1.0, company="Acme REIT")

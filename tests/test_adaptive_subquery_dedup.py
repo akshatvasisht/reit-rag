@@ -14,7 +14,7 @@ from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-import pytest
+from anthropic.types import ToolUseBlock
 
 from src.models import Chunk, RetrievedChunk
 from src.retrieval.pipeline import RetrievalResult
@@ -71,9 +71,14 @@ def _make_tool_use_response(
 ) -> MagicMock:
     if company_filter is None:
         company_filter = []
-    tool_block = MagicMock()
-    tool_block.type = "tool_use"
-    tool_block.input = {"query": sub_query, "company_filter": list(company_filter)}
+    # Real ToolUseBlock instance, not a MagicMock duck-type — production
+    # code narrows via ``isinstance(b, ToolUseBlock)``.
+    tool_block = ToolUseBlock(
+        id="tu_test",
+        name="retrieve_more",
+        input={"query": sub_query, "company_filter": list(company_filter)},
+        type="tool_use",
+    )
     response = MagicMock()
     response.stop_reason = "tool_use"
     response.content = [tool_block]

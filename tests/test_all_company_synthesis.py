@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-import pytest
 
 from src.models import Chunk, RetrievedChunk
 from src.retrieval.pipeline import RetrievalResult

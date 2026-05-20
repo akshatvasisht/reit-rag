@@ -46,6 +46,14 @@ _registry: dict[tuple[str, str | None], CrossEncoder] = {}
 # web-search corpus; REIT financial passages are out of distribution); see
 # ARCHITECTURE.md "Rerank gate calibration and the domain-mismatch decision
 # tree" for the calibration procedure and the decision tree for future changes.
+#
+# Empirical anchor (28-query eval set): the only query with top_rerank_score
+# below -5.0 is g21 (EGP leasing-spread trend), which has no on-topic chunk
+# in the candidate pool — abstention is the correct decision there. Queries
+# scoring in (-5.0, 0] succeed when an LLM-level abstain guard fires instead.
+# A tighter threshold (e.g. -2.0) would not change observed pass/abstain
+# outcomes on this corpus; a looser one (e.g. -8.0) would silence the only
+# retrieval-side abstain that fires today.
 RERANK_THRESHOLD: float = -5.0
 
 # Content types whose `chunk_text` is free-form prose emitted by the vision

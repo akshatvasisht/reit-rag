@@ -15,7 +15,6 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
-import pytest
 
 from src.models import Chunk, RetrievedChunk
 from src.retrieval.pipeline import expand_sibling_pages
@@ -216,6 +215,38 @@ def test_appended_chunk_carries_retrieval_stage_tag() -> None:
     assert appended.trigger_chunk_id == str(trigger_id)
     assert "page 7" in (appended.expansion_reason or "")
     assert appended.rerank_score is None
+
+
+def test_index_reference_page_class_excluded_by_sql_filter() -> None:
+    """Same-page chunks marked as index_reference/cover_page/boilerplate_legal
+    must not be returned by the expansion query — the SQL filter mirrors BM25's."""
+    from src.retrieval.bm25 import _BOILERPLATE_FILTER
+    from src.retrieval.pipeline import expand_sibling_pages as _epp  # noqa: F401
+    import inspect
+
+    src = inspect.getsource(_epp)
+    assert "_BOILERPLATE_FILTER" in src, (
+        "expand_sibling_pages must embed the boilerplate filter so TOC / cover "
+        "pages cannot enter via sibling expansion"
+    )
+    # Sanity: the filter string excludes the expected classes.
+    assert "index_reference" in _BOILERPLATE_FILTER
+    assert "cover_page" in _BOILERPLATE_FILTER
+    assert "boilerplate_legal" in _BOILERPLATE_FILTER
+
+    # Behavioral check: when the DB returns NO rows (because the filter rejected
+    # an index_reference sibling), expand_sibling_pages must not include it.
+    doc_id = uuid4()
+    trigger = _make_chunk(page_number=4, document_id=doc_id)
+    rc = _make_rc(trigger, score=5.0)
+
+    # Mock conn returns empty rows — simulating SQL filter excluding the
+    # index_reference candidate.
+    conn = _mock_conn_with_rows([])
+
+    result = expand_sibling_pages([rc], conn)
+    assert len(result) == 1
+    assert result[0] is rc
 
 
 def test_chunks_already_in_retained_set_not_duplicated() -> None:

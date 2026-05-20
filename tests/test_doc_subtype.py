@@ -6,7 +6,6 @@ import json
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-import pytest
 
 from src.models import Chunk, DocumentMeta, RetrievedChunk
 from src.versioning.chains import dedupe_by_version_group, version_group_key

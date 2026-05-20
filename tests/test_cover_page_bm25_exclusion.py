@@ -6,7 +6,6 @@ exclusion behavior.
 """
 from __future__ import annotations
 
-import pytest
 
 from src.retrieval.bm25 import _BOILERPLATE_FILTER
 
@@ -62,4 +61,32 @@ def test_substantive_not_in_filter():
     excluded = m.group(1)
     assert "substantive" not in excluded, (
         "'substantive' should not be in the exclusion list"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. unknown-class chunks are intentionally included by the current filter
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_class_not_excluded():
+    """unknown chunks must pass the filter while the residual is non-trivial.
+
+    Most recent reclassify pass left ~28.6% of chunks at 'unknown'
+    (1,283 / 4,489). Excluding 'unknown' would drop a large share of the
+    corpus and harm recall, so the filter stays NULL-tolerant / NOT IN(...)
+    and excludes only confidently-classified boilerplate classes. Tighten
+    to a 'substantive'-only allow-list once the residual drops below ~5%.
+    """
+    import re
+    m = re.search(r"NOT IN \(([^)]+)\)", _BOILERPLATE_FILTER, re.IGNORECASE)
+    assert m is not None
+    excluded = m.group(1)
+    assert "unknown" not in excluded, (
+        "'unknown' must not be in the exclusion list while the residual is "
+        "non-trivial; tighten only after classifier coverage improves."
+    )
+    assert "IS NULL" in _BOILERPLATE_FILTER, (
+        "Filter must keep NULL-tolerant clause so chunks predating the "
+        "classifier still reach BM25 recall."
     )

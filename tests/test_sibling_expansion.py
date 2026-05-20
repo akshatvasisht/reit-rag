@@ -6,11 +6,9 @@ Each test completes in well under 2 seconds.
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
-import pytest
 
 from src.models import Chunk, RetrievedChunk
 from src.retrieval.pipeline import (

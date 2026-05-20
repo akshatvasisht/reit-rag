@@ -1,4 +1,4 @@
-"""Unit tests for table-pair retrieval expansion stage (2c).
+"""Unit tests for the table-pair retrieval expansion stage.
 
 Verifies that when a text chunk on page N is in the retained set, any
 table/chart_description chunk on the same (document_id, page_number) is
@@ -9,11 +9,9 @@ All tests use mocked DB connections — no real database or network access.
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
-import pytest
 
 from src.models import Chunk, RetrievedChunk
 from src.retrieval.pipeline import expand_table_pairs

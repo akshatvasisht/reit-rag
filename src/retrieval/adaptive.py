@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from anthropic import Anthropic
+from anthropic.types import ToolUseBlock
 
 from src.models import RetrievedChunk
 
@@ -246,7 +247,7 @@ def adaptive_retrieve(
             break
 
         tool_block = next(
-            (b for b in response.content if getattr(b, "type", None) == "tool_use"),
+            (b for b in response.content if isinstance(b, ToolUseBlock)),
             None,
         )
         if tool_block is None:
@@ -324,6 +325,11 @@ def adaptive_retrieve(
                 merged_contexts.append(rc)
                 new_count += 1
         logger.info("Adaptive hop %d: +%d new chunks merged", hop + 1, new_count)
+
+    # Per-hop pipelines each cap their own page counts, but unioning the hops
+    # can re-exceed the cap on shared pages — re-apply once on the merged set.
+    from src.retrieval.pipeline import _cap_chunks_per_page  # noqa: PLC0415
+    merged_contexts = _cap_chunks_per_page(merged_contexts)
 
     merged_contexts_sorted = sorted(
         merged_contexts,

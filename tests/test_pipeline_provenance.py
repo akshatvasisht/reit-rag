@@ -1,4 +1,4 @@
-"""Unit tests for per-chunk retrieval provenance fields (2g).
+"""Unit tests for per-chunk retrieval provenance fields.
 
 Verifies that retrieval_stage, trigger_chunk_id, and expansion_reason are
 populated correctly for each expansion type in the pipeline.
@@ -11,13 +11,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
-import pytest
 
 from src.models import Chunk, RetrievedChunk
 from src.retrieval.pipeline import (
     enforce_per_issuer_floor,
     expand_table_pairs,
-    expand_to_siblings,
 )
 
 

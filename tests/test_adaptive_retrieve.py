@@ -8,17 +8,18 @@ from __future__ import annotations
 
 from typing import Any
 from unittest.mock import MagicMock, patch
+
+from anthropic.types import ToolUseBlock
 from uuid import uuid4
 
 import pytest
 
-from src.models import Chunk, RetrievedChunk, StructuredAnswer, Claim
+from src.models import Chunk, RetrievedChunk, StructuredAnswer
 from src.retrieval.adaptive import (
-    ADAPTIVE_INTENTS,
     MAX_ADAPTIVE_HOPS,
     adaptive_retrieve,
 )
-from src.retrieval.pipeline import RetrievalResult, retrieve
+from src.retrieval.pipeline import RetrievalResult
 
 
 # ---------------------------------------------------------------------------
@@ -71,10 +72,17 @@ def _make_initial_result(
 
 
 def _make_tool_use_response(sub_query: str, company_filter: list[str]) -> MagicMock:
-    """Build a mock Anthropic response with a tool_use block."""
-    tool_block = MagicMock()
-    tool_block.type = "tool_use"
-    tool_block.input = {"query": sub_query, "company_filter": company_filter}
+    """Build a mock Anthropic response with a tool_use block.
+
+    Uses a real ``ToolUseBlock`` instance (not a MagicMock duck-type) because
+    the production code narrows via ``isinstance(b, ToolUseBlock)``.
+    """
+    tool_block = ToolUseBlock(
+        id="tu_test",
+        name="retrieve_more",
+        input={"query": sub_query, "company_filter": company_filter},
+        type="tool_use",
+    )
 
     response = MagicMock()
     response.stop_reason = "tool_use"
@@ -406,7 +414,6 @@ def test_structured_answer_defaults() -> None:
 
 def test_answer_structured_populates_hop_diagnostics(monkeypatch) -> None:
     """answer_structured() must copy retrieval_hops and sub_queries_fired from diagnostics."""
-    import json
     from src.generation import generator
 
     hop_diagnostics = {

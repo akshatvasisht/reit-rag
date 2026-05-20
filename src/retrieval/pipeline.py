@@ -6,33 +6,27 @@ Streamlit UI.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import warnings
+import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from uuid import UUID
 
 from src.db import connect
 from src.corpus_registry import CORPUS_REGISTRY
 from src.models import Chunk, RetrievedChunk
 from src.retrieval.adaptive import ADAPTIVE_INTENTS, adaptive_retrieve
-from src.retrieval.bm25 import bm25_search
+from src.retrieval.bm25 import _BOILERPLATE_FILTER, bm25_search
 from src.retrieval.confidence import (
-    CONFIDENCE_HIGH_CUTOFF,
-    CONFIDENCE_LOW_CUTOFF,
-    _score_magnitude_signal,
     compute_retrieval_confidence,
-    confidence_band,
+    confidence_band as confidence_band,
 )
 from src.retrieval.entity_filter import extract_companies
 from src.retrieval.fusion import rrf_fuse
 from src.retrieval.reranker import RERANK_THRESHOLD, rerank
 from src.retrieval.synthesis import retrieve_all_company_synthesis
 from src.retrieval.vector import vector_search
-from src.versioning.chains import dedupe_by_version_group, expand_to_parents
-from src.versioning.classifier import TemporalIntent, classify_intent, classify_intent_full
+from src.versioning.chains import dedupe_by_version_group, expand_to_parents, version_group_key
+from src.versioning.classifier import TemporalIntent, classify_intent_full
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +99,20 @@ CANDIDATES_PER_RETRIEVER = 50   # top-K from BM25 and from vector
 FUSED_TOP_N = 40                # candidates passed to reranker
 RERANK_TOP_N = 5                # default contexts returned to the LLM
 RRF_K = 60                      # standard RRF constant
+ENTITY_ANCHOR_MAX = 3           # cap on chunks promoted by entity-anchor boost
+MAX_CHUNKS_PER_PAGE = 3         # per (document_id, page_number) cap after expansion
+VERSION_FLOOR_MAX = 2           # max chunks injected per missing version group
+PER_VERSION_K_COMPARISON = 4    # top-K per version group for comparison/conflict intents
+
+# Proper-noun-shaped anchor extraction from the query. Each token must be
+# either a true Title-Cased word (uppercase initial + at least one lowercase
+# letter — "Madison", "Avenue") or a digit-bearing token ("343", "12th").
+# All-caps tokens (BXP, FFO, NOI, AI) are deliberately excluded because they
+# overlap with reporting acronyms that appear in nearly every chunk and would
+# over-fire the boost on generic metric queries like "2025 FFO guidance".
+_QUERY_ANCHOR_RE = re.compile(
+    r"\b(?:[A-Z][a-z][a-zA-Z]*|\d+\w*)(?:\s+(?:[A-Z][a-z][a-zA-Z]*|\d+\w*))+\b"
+)
 
 # Per-intent rerank-budget overrides. Intents that span multiple deck versions
 # or multiple issuers need a wider top-K because the answer is built from
@@ -401,6 +409,8 @@ def expand_sibling_pages(
     visited_pages: set[tuple] = set()  # (document_id, page_number)
     to_add: list[RetrievedChunk] = []
 
+    # Apply the same page_content_class filter BM25 uses so TOC/cover/legal
+    # boilerplate pages do not enter via sibling-page expansion.
     sql = f"""
         SELECT {_CHUNK_SELECT}
         FROM chunks
@@ -408,6 +418,7 @@ def expand_sibling_pages(
           AND page_number = %s
           AND id != ALL(%s)
           AND is_parent = FALSE
+          {_BOILERPLATE_FILTER}
         ORDER BY id
         LIMIT %s
     """
@@ -609,6 +620,251 @@ def find_conflicting_chunks(
     return list(retained) + conflict_chunks
 
 
+def _expand_table_and_page_siblings(
+    contexts: list[RetrievedChunk],
+    conn,
+    *,
+    abstain: bool,
+) -> list[RetrievedChunk]:
+    """Run table-pair expansion followed by sibling-page expansion.
+
+    No-op on the abstain path: same-page expansions are only meaningful when
+    the LLM will produce an answer.
+    """
+    if abstain:
+        return list(contexts)
+    with_table_pairs = expand_table_pairs(contexts, conn)
+    return expand_sibling_pages(with_table_pairs, conn)
+
+
+def _extract_query_anchors(query: str) -> list[str]:
+    """Return proper-noun-shaped anchors from *query*.
+
+    Anchors are multi-token Title-Case or digit-bearing sequences. The filter
+    requires each anchor to either contain a digit, span ≥3 tokens, or include
+    a ≥7-char token — keeps "343 Madison Avenue" / "Empire State Building" /
+    "Digital Realty" while rejecting "What Is" / "How Did".
+    """
+    candidates = _QUERY_ANCHOR_RE.findall(query)
+    anchors: list[str] = []
+    for c in candidates:
+        tokens = c.split()
+        has_digit = any(any(ch.isdigit() for ch in t) for t in tokens)
+        has_long_token = any(len(t) >= 7 for t in tokens)
+        if has_digit or len(tokens) >= 3 or has_long_token:
+            anchors.append(c)
+    return anchors
+
+
+_ANCHOR_CONTENT_PRIORITY = {
+    "table": 0,
+    "mixed": 1,
+    "chart_description": 2,
+    "text": 3,
+    "chart_caption": 4,
+    "chart_context": 5,
+}
+
+
+def _entity_anchor_boost(
+    query: str,
+    fused: list[RetrievedChunk],
+    reranked: list[RetrievedChunk],
+    max_anchored: int = ENTITY_ANCHOR_MAX,
+) -> list[RetrievedChunk]:
+    """Promote rerank-pool chunks whose contextualized_text mentions a query
+    anchor but were dropped by the top-N cutoff.
+
+    Closes the gap where the cross-encoder prefers chunks that exclusively
+    discuss an entity over chunks that mention the entity among others.
+    Among matching candidates, prefers data-bearing content types
+    (``table``, ``mixed``, ``chart_description``) over narrative ``text``:
+    when a user names a specific project, the table that lists project
+    economics is what they are usually after. RRF order is the within-type
+    tiebreaker.
+    """
+    anchors = _extract_query_anchors(query)
+    if not anchors:
+        return []
+
+    reranked_ids = {rc.chunk.id for rc in reranked}
+    matches: list[tuple[int, int, str, RetrievedChunk]] = []
+    for rrf_pos, rc in enumerate(fused):
+        if rc.chunk.id in reranked_ids:
+            continue
+        haystack = (rc.chunk.contextualized_text or "") + " " + (rc.chunk.chunk_text or "")
+        matched = next((a for a in anchors if a in haystack), None)
+        if matched is None:
+            continue
+        priority = _ANCHOR_CONTENT_PRIORITY.get(rc.chunk.content_type, 99)
+        matches.append((priority, rrf_pos, matched, rc))
+
+    matches.sort(key=lambda m: (m[0], m[1]))
+    boosted: list[RetrievedChunk] = []
+    for _, _, matched, rc in matches[:max_anchored]:
+        rc.retrieval_stage = "entity_anchored"
+        rc.expansion_reason = f"query anchor: {matched}"
+        boosted.append(rc)
+    return boosted
+
+
+# Stage priority for per-page trimming — most useful first. Stages not listed
+# (or None) sort last so unknown provenance never displaces tagged chunks.
+_PER_PAGE_STAGE_PRIORITY: dict[str, int] = {
+    "reranked": 0,
+    "entity_anchored": 1,
+    "parent_expanded": 2,
+    "table_pair_expanded": 3,
+    "sibling_page_expanded": 4,
+    "sibling_expanded": 5,
+}
+
+
+def _cap_chunks_per_page(
+    contexts: list[RetrievedChunk],
+    max_per_page: int = MAX_CHUNKS_PER_PAGE,
+) -> list[RetrievedChunk]:
+    """Cap chunks sharing a (document_id, page_number) at ``max_per_page``.
+
+    Prevents same-page stacking when parent + sibling-page + table-pair
+    expansions all fire on the same page. Pages with fewer than the cap are
+    untouched. Within an over-cap page, chunks are kept in stage priority
+    order; input order breaks ties so deterministic sort downstream is
+    unaffected.
+    """
+    if not contexts:
+        return contexts
+
+    by_page: dict[tuple, list[tuple[int, RetrievedChunk]]] = {}
+    no_page: list[tuple[int, RetrievedChunk]] = []
+    for idx, rc in enumerate(contexts):
+        if rc.chunk.page_number is None:
+            no_page.append((idx, rc))
+            continue
+        key = (rc.chunk.document_id, rc.chunk.page_number)
+        by_page.setdefault(key, []).append((idx, rc))
+
+    kept: list[tuple[int, RetrievedChunk]] = list(no_page)
+    dropped = 0
+    for page_chunks in by_page.values():
+        if len(page_chunks) <= max_per_page:
+            kept.extend(page_chunks)
+            continue
+        ranked = sorted(
+            page_chunks,
+            key=lambda item: (
+                _PER_PAGE_STAGE_PRIORITY.get(item[1].retrieval_stage or "", 99),
+                item[0],
+            ),
+        )
+        kept.extend(ranked[:max_per_page])
+        dropped += len(page_chunks) - max_per_page
+
+    if dropped:
+        logger.info("  [per-page-cap] dropped %d chunk(s) above cap=%d", dropped, max_per_page)
+
+    kept.sort(key=lambda item: item[0])
+    return [rc for _, rc in kept]
+
+
+def enforce_per_version_floor(
+    retained: list[RetrievedChunk],
+    fused_by_version_group: dict[tuple[str, str, str], list[RetrievedChunk]],
+    intent: str,
+    max_per_group: int = VERSION_FLOOR_MAX,
+) -> list[RetrievedChunk]:
+    """Ensure every version group present in the fused pool reaches retained.
+
+    Only fires for comparison and conflict intents where balanced
+    cross-version representation is the whole point of the query. For each
+    version group missing from retained, the highest-rerank-score chunk from
+    the fused pool is injected with ``retrieval_stage="version_floor"``.
+    """
+    if intent not in ("comparison", "conflict"):
+        return retained
+
+    represented = {version_group_key(rc.chunk) for rc in retained}
+    retained_ids = {rc.chunk.id for rc in retained}
+    to_add: list[RetrievedChunk] = []
+
+    for group_key, candidates in fused_by_version_group.items():
+        if group_key in represented:
+            continue
+        if not candidates:
+            continue
+        scored = sorted(
+            candidates,
+            key=lambda rc: rc.rerank_score if rc.rerank_score is not None else float("-inf"),
+            reverse=True,
+        )
+        added_for_group = 0
+        for rc in scored:
+            if added_for_group >= max_per_group:
+                break
+            if rc.chunk.id in retained_ids:
+                continue
+            rc.retrieval_stage = "version_floor"
+            rc.expansion_reason = (
+                f"per-version floor: {group_key[0]} / {group_key[1]} / {group_key[2]} "
+                f"(score={rc.rerank_score})"
+            )
+            to_add.append(rc)
+            retained_ids.add(rc.chunk.id)
+            added_for_group += 1
+            logger.info(
+                "  [version-floor] added chunk for %s (score=%s)",
+                group_key,
+                rc.rerank_score,
+            )
+
+    if to_add:
+        logger.info(
+            "  [version-floor] added %d chunk(s) for %d missing group(s)",
+            len(to_add), len({version_group_key(rc.chunk) for rc in to_add}),
+        )
+
+    return retained + to_add
+
+
+def _balance_per_version(
+    reranked_all: list[RetrievedChunk],
+    intent: str,
+    *,
+    total_budget: int,
+    per_version_k: int = PER_VERSION_K_COMPARISON,
+) -> list[RetrievedChunk]:
+    """Take top-K per version group instead of global top-N.
+
+    Comparison and conflict intents need balanced version representation; a
+    global top-N pass can skew heavily to whichever version's phrasing best
+    matches the query (e.g. a deck whose section dates match the query's
+    date range outscores a sibling deck across the board). For other intents
+    this is a no-op — caller still gets ``reranked_all[:total_budget]``.
+
+    Returns at most ``total_budget`` chunks, re-sorted by global rerank_score
+    descending so the LLM still sees the strongest evidence first.
+    """
+    if intent not in ("comparison", "conflict") or not reranked_all:
+        return reranked_all[:total_budget]
+
+    by_version: dict[tuple[str, str, str], list[RetrievedChunk]] = {}
+    for rc in reranked_all:
+        by_version.setdefault(version_group_key(rc.chunk), []).append(rc)
+
+    if len(by_version) <= 1:
+        return reranked_all[:total_budget]
+
+    balanced: list[RetrievedChunk] = []
+    for group_chunks in by_version.values():
+        balanced.extend(group_chunks[:per_version_k])
+
+    balanced.sort(
+        key=lambda rc: rc.rerank_score if rc.rerank_score is not None else float("-inf"),
+        reverse=True,
+    )
+    return balanced[:total_budget]
+
+
 def _apply_post_rerank_pipeline(
     contexts: list[RetrievedChunk],
     *,
@@ -701,17 +957,11 @@ def _apply_post_rerank_pipeline(
                 f"(borderline-band trigger)"
             )
 
-    # Stage 5b — table-pair expansion (answered path only).
-    if not abstain:
-        with_table_pairs = expand_table_pairs(with_siblings, conn)
-    else:
-        with_table_pairs = list(with_siblings)
+    with_sibling_pages = _expand_table_and_page_siblings(with_siblings, conn, abstain=abstain)
 
-    # Stage 5c — sibling-page expansion (answered path only).
-    if not abstain:
-        with_sibling_pages = expand_sibling_pages(with_table_pairs, conn)
-    else:
-        with_sibling_pages = list(with_table_pairs)
+    # Cap chunks-per-page before the global cap so parent + sibling-page +
+    # table-pair stages cannot stack many chunks for a single page.
+    with_sibling_pages = _cap_chunks_per_page(with_sibling_pages)
 
     # Stage 6 — cap after all expansion stages. Expanded chunks are
     # lower-priority than core; within expansion, table_pair_expanded has the
@@ -819,13 +1069,41 @@ def _retrieve_core(
     fused = rrf_fuse(bm25_results, vector_results, k=RRF_K, top_n=fused_top_n)
     logger.info("  Fused candidates: %d", len(fused))
 
-    reranked = rerank(query, fused, top_n=rerank_top_n)
+    # For comparison/conflict, score the full fused pool so per-version
+    # top-K balancing has all candidates to choose from; for other intents
+    # the existing top-N cutoff is fine. The cross-encoder scores every
+    # candidate in either case, only the slice returned differs.
+    if intent in ("comparison", "conflict"):
+        reranked_all = rerank(query, fused, top_n=len(fused))
+        reranked = _balance_per_version(reranked_all, intent, total_budget=rerank_top_n)
+    else:
+        reranked = rerank(query, fused, top_n=rerank_top_n)
     logger.info("  Reranked top score: %.3f",
                 reranked[0].rerank_score if reranked else float("-inf"))
 
     for rc in reranked:
         if rc.retrieval_stage is None:
             rc.retrieval_stage = "reranked"
+
+    # Entity-anchor boost: promote rerank-pool chunks whose contextualized
+    # text mentions a query proper-noun anchor (e.g., "343 Madison Avenue")
+    # but were dropped by the top-N cutoff.
+    anchored = _entity_anchor_boost(query, fused, reranked)
+    if anchored:
+        logger.info(
+            "  Entity-anchored: %d additional chunk(s) (pages=%s)",
+            len(anchored),
+            [rc.chunk.page_number for rc in anchored],
+        )
+        reranked = reranked + anchored
+
+    # Per-version floor: comparison/conflict queries depend on balanced
+    # multi-version evidence; inject best chunk from any group absent from
+    # the rerank top-N.
+    fused_by_version_group: dict[tuple[str, str, str], list[RetrievedChunk]] = {}
+    for rc in fused:
+        fused_by_version_group.setdefault(version_group_key(rc.chunk), []).append(rc)
+    reranked = enforce_per_version_floor(reranked, fused_by_version_group, intent)
 
     top_rerank_score = (
         reranked[0].rerank_score if reranked and reranked[0].rerank_score is not None

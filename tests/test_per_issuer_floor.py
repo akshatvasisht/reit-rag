@@ -9,11 +9,8 @@ All tests use mocked structures — no real database or network access.
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
-import pytest
 
 from src.models import Chunk, RetrievedChunk
 from src.retrieval.pipeline import enforce_per_issuer_floor
