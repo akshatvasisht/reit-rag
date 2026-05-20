@@ -34,6 +34,8 @@ Contextualization runs via the Anthropic Batch API (`scripts/contextualize.py`) 
 
 A page-content classifier (`src/ingestion/page_classifier.py`, Claude Haiku with a keyword pre-filter and LLM fallback) tags each chunk with `page_content_class` ∈ {`substantive`, `boilerplate_legal`, `index_reference`, `cover_page`}. BM25 retrieval excludes the three non-substantive classes via a SQL filter in `src/retrieval/bm25.py`; dense retrieval is left unfiltered (embedding distance handles such pages without the precision cost at recall stage). This prevents, e.g., a Digital Realty trademark/disclaimer page from outranking the substantive p.4–7 strategy content on a broad strategy query.
 
+An entity-anchor boost (`src/retrieval/pipeline.py:_entity_anchor_boost`) promotes rerank-pool chunks whose `contextualized_text` contains a proper-noun phrase from the query but were dropped by the top-N cutoff. Closes the gap where the cross-encoder prefers chunks exclusively about an entity over broader chunks that mention the entity among others — anchor case is a project-economics table that lists six projects competing against single-project narrative pages. Among matching candidates, data-bearing content types (`table`, `mixed`, `chart_description`) are preferred over narrative `text`, with RRF order as the within-type tiebreaker. Capped at 3 promoted chunks per query. The anchor extractor requires each token in a proper-noun phrase to be a Title-Cased word with lowercase letters or a digit-bearing token, which excludes all-caps acronyms (FFO, BXP, NOI) that would over-fire on generic metric queries.
+
 ## Versioning
 
 Documents are grouped into version groups by `(company, doc_type, doc_subtype)`, ordered by `report_date`. An intent classifier reads the query for `latest` (default), `historical`, `comparison`, `conflict`, or `all_company_synthesis`. For `latest` intent, version-group deduplication suppresses older versions before the LLM sees context, so the model never silently averages between (for example) DLR's December 2025 and March 2026 figures. For `comparison` intent ("how did DLR change between Dec and Mar"), both versions are retained and the answer surfaces each with its date in the citation.
@@ -66,7 +68,7 @@ The weighted sum is clamped to [0, 1] and mapped to three display bands:
 | Medium | 0.45 – 0.75 | Amber — "Medium confidence" with a verification caveat |
 | Low | < 0.45 | Red — "Low confidence" with a manual-review caveat |
 
-**Calibration note.** The 0.75 / 0.45 cutoffs and the 0.50 / 0.30 / 0.20 weights are uncalibrated initial values. To calibrate: run `scripts/evaluate.py --out report.md`, collect the per-query confidence values from the report, then redraw the cutoffs at the medians of correct / borderline / refused query groups. Refit weights by minimising band-label error on the evaluation set.
+**Calibration note.** The 0.75 / 0.45 cutoffs are anchored against the 28-query evaluation set. Empirically the answered-path confidence distribution has median 0.54 (min 0.11, max 0.93); the 0.75 cutoff isolates the two highest-trust queries (a confident soft-refusal and a conflict-detection case with both versions retained), and the 0.45 cutoff catches the broad-synthesis tail where the cross-company score gap is naturally narrow. Hard-pass and soft-pass groups did not separate by confidence (medians 0.540 vs 0.527), so the cutoffs are head/tail discriminators on this corpus rather than pass/fail predictors. The 0.50 / 0.30 / 0.20 signal weights remain uncalibrated; rerun this analysis if the corpus or eval set materially changes.
 
 For the all-company synthesis path (one sub-retrieval per corpus company), the cross-company score gap is not meaningful — each company was retrieved independently. Confidence is instead the mean of per-company magnitude signals for companies that returned scored chunks.
 
@@ -74,19 +76,25 @@ Confidence is computed on the post-rerank chunk list, before conflict injection 
 
 ## Known Limitations
 
-- **Lexical mismatch on chart-derived queries.** Vision-extracted chart descriptions use the model's own phrasing; a query word can fail to match a near-synonym in the description and miss retrieval. Wider RRF candidate pool mitigates but does not eliminate this.
+- **Lexical mismatch on chart-derived queries.** Vision-extracted chart descriptions use the model's own phrasing; a query word can fail to match a near-synonym in the description and miss retrieval. Mitigated by a wider RRF candidate pool and by the reranker prepending a structured provenance marker (`Chart from {company} ({doc_type}, p.N): `) to chart_description/chart_context chunks so the cross-encoder has a lexical handle on entity and document type (`src/retrieval/reranker.py:_passage_for_rerank`). Not eliminated — synonym gaps inside the vision prose itself still depress recall.
 - **No conversation memory.** The Streamlit UI is intentionally single-turn; follow-up queries ("what about for VICI?") do not carry context from the previous answer.
-- **Citation faithfulness is source-level, not claim-level.** The check verifies that every cited chunk was in the retrieved context, not that the chunk's content actually supports the specific claim attached. Claim-level verification is RAGAS territory and runs offline.
+- **Citation faithfulness is partially claim-level.** Every numeric claim is verified against the cited chunk at runtime — `src/generation/citation_check.py:check_numeric_consistency` splits composite values, normalizes scale words and units, handles parenthetical accounting negatives, and flags mismatches before the answer is returned. Non-numeric (qualitative) claim-level verification — does the chunk's text actually support the specific qualitative assertion attached — remains source-level and would require a RAGAS-style offline pass.
 - **Multi-tenant access control is conceptual.** The metadata schema is RLS-ready but row-level security is not configured; documents are treated as a single tenant.
 - **Vision extraction can be conservative.** When a chart value isn't fully readable, the model marks it "approximately" — which is correct behavior, but means some answers carry hedged numbers.
-- **Corpus knowledge is hardcoded.** `src/corpus_registry.py` is the canonical registry mapping filename keywords to document metadata (re-exported from `src/ingestion/metadata.py` for backward compatibility); entity filtering and the "latest-period" classifier read from this same registry. Production path is LLM-based metadata extraction at ingestion (RAGFlow / Haystack pattern), with entity vocabulary derived from `SELECT DISTINCT company FROM documents`.
+- **Corpus knowledge is seed-plus-DB.** `src/corpus_registry.py` ships a hardcoded seed list as bootstrap; on first access `CorpusRegistry.refresh()` reloads entries from the `documents` table so the live registry reflects whatever has actually been ingested, with the seed retained as a fallback on DB unavailability. Fully LLM-extracted metadata at ingestion (RAGFlow / Haystack pattern) is still the next step; the registry-driven entity vocabulary and "latest-period" classifier read from the unified registry.
+- **Cross-encoder reranker context truncation.** The local cross-encoder (ms-marco-MiniLM-L-6-v2) truncates passages at ~512 tokens. Mid-table entity mentions on long table chunks (e.g., a $3.6B project-economics table) are invisible to the reranker, so specific-entity queries against deep table content can miss top-5 even when the chunk is in the candidate pool. The post-rerank entity-anchor boost (`src/retrieval/pipeline.py:_entity_anchor_boost`) compensates by promoting broader chunks whose contextualized text contains the query's proper-noun phrase, but the substring match is case- and form-sensitive (canonical vs possessive forms aren't unified), so the boost narrows the gap without closing it. Fix path is either targeted re-contextualization with entity-enumerating prompts, a normalization-aware anchor matcher, or a swap to a longer-context reranker.
 
 ## What I Would Improve With More Time
 
-- **Fine-tune the reranker on financial-domain pairs.** The cross-encoder's logit distribution skews negative for natural-language questions against passage-style chunks; a domain-tuned reranker would let the abstention threshold tighten without re-introducing false abstentions.
+- **Swap to a longer-context reranker.** Move from ms-marco-MiniLM-L-6-v2 (512-token window) to BGE Reranker v2 (8K window) or Cohere Rerank v4 (32K window). The gap on long table chunks is context truncation, not domain mismatch — mid-table entity names fall outside the visible window for cross-encoder scoring. A longer-context model removes the ceiling without retraining.
 - **Ingestion-time forward-looking-statement tagger.** The runtime prompt-level guard at generation already prevents historical actuals from being presented as guidance; complementing it with a FinBERT-class tagger that classifies chunks as `reported | guidance | risk_factor` would move the signal from query-time inference into the index itself.
+- **Surface `chunk_claims` as structured LLM context.** The pre-extracted `(company, metric, value, qualifier)` tuples in the database are consumed only by retrieval-side conflict detection and the post-generation numeric checker. Surfacing them as a separate prompt section alongside the chunk excerpts would give the LLM canonical numbers for the queried entity instead of leaving it to re-read the chunk text under truncation pressure. Requires a query-conditioned filter (only `(company, metric)` rows matching the query) plus a prompt-section schema so structured facts and chunk text don't double-count.
 - **Multi-pass chart faithfulness check.** A second vision call comparing extracted values against the chart image, flagging discrepancies before display.
 - **Multi-tenant access control.** Add a `tenant_id` column plus PostgreSQL row-level security policies; the pattern transfers cleanly to a managed vector store should the storage layer change later.
+- **Section-aware chunker.** Replace page-boundary chunking with topic/section-aware splitting that coalesces sub-threshold fragments, restores footnote markers at parse-time, and emits `mixed` chunks where a text block and an adjacent table describe one logical figure. Eliminates several retrieval-time noise filters currently compensating for fragment-grade chunks.
+- **Ingestion-time structured-metadata pass.** Extract `data_as_of_date`, financial-value lists, and an entity index per chunk at ingestion rather than re-running regex per query. Lets retrieval gain precision via metadata filters — historical reconciliation tables would stop surfacing alongside current-period ones.
+- **Stronger ingestion classifiers.** Rework the page-content classifier to push the residual `unknown` rate below 5% (currently ~28%) so the BM25 filter can be tightened to an explicit `substantive`-only allow-list; same principle for chart enrichment, where company / doc-type provenance should be baked into the stored `chunk_text` rather than injected by the reranker at score time.
+- **Chunk-id-level citation faithfulness.** The post-generation check matches at `(company, doc_type, date, page)`, so every chunk on a cited page registers as cited. Adding a stable chunk-coordinate token to the citation format and verifying against it gives per-claim faithfulness reporting and accurate source-panel attribution.
 
 ## Highlighted Changes
 
@@ -114,10 +122,6 @@ Confidence is computed on the post-rerank chunk list, before conflict injection 
 
 **Decided not to change.** Skipping boilerplate chunks at ingestion entirely. Retention preserves the option to answer queries about disclosure wording or document structure; retrieval-stage filtering is the right place to enforce relevance.
 
-## Overall Changes
-
-Three review issues addressed: conflict-language queries route to `comparison`/`conflict` and retain all versions (DLR December deck no longer suppressed); same-date deck collisions (BXP Investor Day vs Quarterly, PSA Company Update vs Merger) disambiguated via `doc_subtype` and surfaced in citations; ingestion classifies each chunk as `substantive`/`boilerplate_legal`/`index_reference`/`cover_page`, with BM25 excluding the three non-substantive. Beyond review: contextualization threaded through the cross-encoder reranker, forward-looking integrity guard at generation, numeric-consistency check hardened, corpus-membership framing added.
-
 ## Run
 
 ```bash
@@ -131,8 +135,7 @@ mkdir -p data/pdfs && cp /path/to/provided/*.pdf data/pdfs/   # 10 corpus PDFs
 python scripts/ingest.py
 python scripts/enrich_charts.py
 
-# Optional back-fills (needed for full feature set; see agentcontext/DEFERRED.md
-# for cost and ordering):
+# One-time back-fills (needed for full feature set; idempotent on re-run):
 python scripts/reclassify_subtypes.py        # populate doc_subtype
 python scripts/reclassify_page_content.py    # populate page_content_class
 python scripts/contextualize.py              # Batches API: contextualize + Qwen3 re-embed; activation gate
