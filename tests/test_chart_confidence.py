@@ -6,10 +6,8 @@ All tests are pure unit tests — no real DB, no network, no Docling PDF parsing
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Optional
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from src.ingestion.chart_extractor import (
     MIN_DESCRIPTION_LENGTH,
@@ -17,7 +15,6 @@ from src.ingestion.chart_extractor import (
     build_chart_context_text,
     extract_chart,
 )
-from scripts.enrich_charts import MIN_CHART_AREA_PX
 
 
 # ---------------------------------------------------------------------------
@@ -95,8 +92,8 @@ def test_confident_extraction_fails_on_short_description() -> None:
 
 # Import at function level to avoid triggering docling imports at collection time.
 
-def _make_bbox(l: float, t: float, r: float, b: float):
-    return SimpleNamespace(l=l, t=t, r=r, b=b)
+def _make_bbox(left: float, top: float, right: float, bottom: float):
+    return SimpleNamespace(l=left, t=top, r=right, b=bottom)
 
 
 def _make_prov(bbox):

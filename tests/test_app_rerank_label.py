@@ -8,7 +8,6 @@ is needed.
 """
 from __future__ import annotations
 
-import contextlib
 import sys
 import types
 
@@ -83,6 +82,14 @@ def _get_rerank_label():
     return app._rerank_label
 
 
+def _get_reorder_fn():
+    """Return the _reorder_by_citation_appearance function from app.py."""
+    _install_streamlit_stub()
+    sys.modules.pop("app", None)
+    import app  # noqa: PLC0415
+    return app._reorder_by_citation_appearance
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -118,3 +125,91 @@ def test_negative_score_shows_value():
     fn = _get_rerank_label()
     label = fn(-2.50)
     assert "-2.50" in label
+
+
+# ---------------------------------------------------------------------------
+# _reorder_by_citation_appearance — citation-order source panel
+# ---------------------------------------------------------------------------
+
+
+def _make_rc(
+    company: str = "Digital Realty",
+    doc_type: str = "investor_presentation",
+    report_date: str = "2026-03",
+    page_number: int = 5,
+    rerank_score: float | None = 1.0,
+):
+    """Build a minimal RetrievedChunk for reorder tests."""
+    from uuid import uuid4
+    from src.models import Chunk, RetrievedChunk  # noqa: PLC0415
+    chunk = Chunk(
+        id=uuid4(),
+        document_id=uuid4(),
+        company=company,
+        ticker="X",
+        doc_type=doc_type,
+        report_date=report_date,
+        doc_version=report_date,
+        chunk_text="body",
+        content_type="text",
+        page_number=page_number,
+    )
+    return RetrievedChunk(chunk=chunk, rerank_score=rerank_score)
+
+
+def test_reorder_moves_cited_chunks_to_their_appearance_order():
+    fn = _get_reorder_fn()
+    rc_p5 = _make_rc(page_number=5, report_date="2026-03")
+    rc_p10 = _make_rc(page_number=10, report_date="2026-02")
+    rc_p3 = _make_rc(page_number=3, report_date="2026-01")
+    answer = (
+        "Leverage was 4.9x [Digital Realty, Investor Presentation, February 2026, p.10]. "
+        "Earlier coverage cited 5.1x [Digital Realty, Investor Presentation, January 2026, p.3]."
+    )
+    ordered = fn([rc_p5, rc_p10, rc_p3], answer)
+    assert [rc.chunk.page_number for rc in ordered] == [10, 3, 5]
+
+
+def test_reorder_pins_uncited_chunks_after_cited():
+    fn = _get_reorder_fn()
+    cited = _make_rc(page_number=7, report_date="2026-03")
+    parent = _make_rc(page_number=99, report_date="2026-02", rerank_score=None)
+    sibling = _make_rc(page_number=100, report_date="2026-01", rerank_score=None)
+    answer = "Detail [Digital Realty, Investor Presentation, March 2026, p.7]."
+    ordered = fn([parent, sibling, cited], answer)
+    assert ordered[0].chunk.page_number == 7
+    assert ordered[1].chunk.page_number == 99
+    assert ordered[2].chunk.page_number == 100
+
+
+def test_reorder_no_answer_text_returns_pipeline_order():
+    fn = _get_reorder_fn()
+    rc_a = _make_rc(page_number=1)
+    rc_b = _make_rc(page_number=2)
+    ordered = fn([rc_a, rc_b], "")
+    assert ordered == [rc_a, rc_b]
+
+
+def test_reorder_disambiguates_collision_with_subtype():
+    """When two chunks share (company, doc_type, report_date), the citation
+    header includes the subtype; the reorder must match that extended form."""
+    fn = _get_reorder_fn()
+    from uuid import uuid4
+    from src.models import Chunk, RetrievedChunk  # noqa: PLC0415
+    def _make(subtype: str, page: int):
+        return RetrievedChunk(chunk=Chunk(
+            id=uuid4(), document_id=uuid4(), company="BXP", ticker="BXP",
+            doc_type="investor_presentation", report_date="2025-12",
+            doc_version="2025-12", chunk_text="body", content_type="text",
+            page_number=page, doc_subtype=subtype,
+        ), rerank_score=1.0)
+    quarterly = _make("quarterly_investor_deck", page=4)
+    investor_day = _make("investor_day_session", page=12)
+    answer = (
+        "Occupancy was 88% [BXP, Investor Presentation (Investor Day Session), "
+        "December 2025, p.12]. Q4 deck reported 87% [BXP, Investor Presentation "
+        "(Quarterly Investor Deck), December 2025, p.4]."
+    )
+    ordered = fn([quarterly, investor_day], answer)
+    assert ordered[0].chunk.doc_subtype == "investor_day_session"
+    assert ordered[1].chunk.doc_subtype == "quarterly_investor_deck"

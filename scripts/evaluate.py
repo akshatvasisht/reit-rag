@@ -484,6 +484,110 @@ def run_reranker_ablation(
 
 
 # ---------------------------------------------------------------------------
+# Per-intent rerank-budget ablation
+# ---------------------------------------------------------------------------
+
+
+def run_rerank_budget_ablation() -> dict[str, dict[str, object]]:
+    """Grid-search per-intent rerank top-K budgets against EVALUATION_SET.
+
+    Tries small perturbations around `_RERANK_TOP_N_BY_INTENT` (default=5,
+    historical=7, comparison/synthesis=8) and reports pass@5 (expected
+    company in top-5 contexts) and MRR over the queries that declare an
+    expected company.
+
+    Returns a dict keyed by config name; each value carries `per_query`,
+    `pass_at_5`, `mrr`, and `n_queries_with_expected`.
+    """
+    from src.retrieval import pipeline as retrieval_pipeline
+    from src.retrieval.pipeline import retrieve as _retrieve
+
+    # (default_k, historical_k, wide_k) — wide_k applies to both
+    # `comparison` and `all_company_synthesis`.
+    grid: list[tuple[int, int, int]] = [
+        (4, 6, 7),
+        (4, 7, 8),
+        (5, 6, 7),
+        (5, 7, 7),
+        (5, 7, 8),  # current production values
+        (5, 7, 9),
+        (5, 8, 9),
+        (6, 7, 8),
+        (6, 8, 9),
+        (6, 8, 10),
+    ]
+
+    out: dict[str, dict[str, object]] = {}
+    original_budget_fn = retrieval_pipeline._rerank_budget_for_intent  # type: ignore[attr-defined]
+
+    try:
+        for default_k, historical_k, wide_k in grid:
+            config_name = f"K_default={default_k}_historical={historical_k}_wide={wide_k}"
+            logger.warning("Budget ablation: %s", config_name)
+
+            def _make_patched(d: int, h: int, w: int):
+                def patched(intent: str, forward_looking: bool = False,
+                            default: int = retrieval_pipeline.RERANK_TOP_N) -> int:
+                    if intent == "historical":
+                        return h
+                    if intent in ("comparison", "all_company_synthesis"):
+                        return w
+                    if forward_looking and intent == "latest":
+                        # Forward-looking + latest mirrors the dispatcher's
+                        # bump path — route through the historical-tier budget.
+                        return h
+                    return d
+                return patched
+
+            retrieval_pipeline._rerank_budget_for_intent = _make_patched(  # type: ignore[attr-defined]
+                default_k, historical_k, wide_k
+            )
+
+            per_query: list[AblationResult] = []
+            for gq in EVALUATION_SET:
+                r = _retrieve(gq.query)
+                per_query.append(_ablation_grade(config_name, gq, r))
+
+            ranks = [
+                pr.expected_company_rank for pr in per_query
+                if pr.expected_company_rank is not None
+            ]
+            pass_at_5 = sum(1 for r in ranks if r <= 5)
+            mrr = sum(1.0 / r for r in ranks) / max(1, len(ranks))
+
+            out[config_name] = {
+                "per_query": per_query,
+                "pass_at_5": pass_at_5,
+                "mrr": mrr,
+                "n_queries_with_expected": len(ranks),
+            }
+    finally:
+        retrieval_pipeline._rerank_budget_for_intent = original_budget_fn  # type: ignore[attr-defined]
+
+    return out
+
+
+def print_budget_ablation(results: dict[str, dict[str, object]]) -> None:
+    """Print a tabular summary of the budget-grid ablation, sorted by pass@5 then MRR."""
+    print()
+    print("Per-intent rerank budget ablation")
+    print(f"{'config':56s}  {'pass@5':>8s}  {'mrr':>8s}  {'n':>4s}")
+    print("-" * 84)
+    rows = sorted(
+        results.items(),
+        key=lambda kv: (-int(kv[1]["pass_at_5"]), -float(kv[1]["mrr"])),  # type: ignore[arg-type]
+    )
+    for config_name, metrics in rows:
+        print(
+            f"{config_name:56s}  "
+            f"{int(metrics['pass_at_5']):8d}  "  # type: ignore[arg-type]
+            f"{float(metrics['mrr']):8.4f}  "    # type: ignore[arg-type]
+            f"{int(metrics['n_queries_with_expected']):4d}"  # type: ignore[arg-type]
+        )
+    print()
+
+
+# ---------------------------------------------------------------------------
 # RAGAS (optional, disabled by default)
 # ---------------------------------------------------------------------------
 
@@ -730,6 +834,8 @@ def main() -> None:
                         help="HuggingFace model identifier for the alternative reranker (used with --ablation-reranker).")
     parser.add_argument("--ablation-revision", type=str, default=None,
                         help="Optional revision hash for the alternative reranker.")
+    parser.add_argument("--ablation-rerank-budgets", action="store_true",
+                        help="Grid-search per-intent rerank top-K budgets against the evaluation set.")
     args = parser.parse_args()
 
     if args.ablation_reranker and not args.ablation_model:
@@ -749,6 +855,11 @@ def main() -> None:
     if args.ablation_reranker:
         logger.warning("== Tier 3b: reranker ablation (%s) ==", args.ablation_model)
         reranker_ablation = run_reranker_ablation(args.ablation_model, args.ablation_revision)
+
+    if args.ablation_rerank_budgets:
+        logger.warning("== Tier 3c: rerank budget ablation ==")
+        budget_ablation = run_rerank_budget_ablation()
+        print_budget_ablation(budget_ablation)
 
     ragas = None
     if args.ragas:
