@@ -363,7 +363,16 @@ _FORWARD_LOOKING_QUERY_RE = re.compile(
     r"projection|projections|projected|"
     r"forecast|forecasted|"
     r"expected\s+(?:to|for)|"
-    r"forward[-\s]looking"
+    r"forward[-\s]looking|"
+    # Date-anchored future references: "year-end 2027", "by 2028", "in 2029"
+    # against a year strictly later than the latest corpus year.
+    r"year[-\s]end\s+20\d{2}|"
+    # Explicit forward-intent verbs that the deck's narrative uses for
+    # planned actions: "plan to deleverage", "intend to refinance",
+    # "aim to expand".
+    r"plan(?:s|ning|ned)?\s+to|"
+    r"intend(?:s|ing|ed)?\s+to|"
+    r"aim(?:s|ing|ed)?\s+to"
     r")\b",
     re.IGNORECASE,
 )

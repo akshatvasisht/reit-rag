@@ -12,7 +12,7 @@ latter is measured by claim-level faithfulness metrics.
 
 `check_numeric_consistency` extends source-faithfulness with value-level
 verification: for every numeric claim, it confirms that the stated value
-actually appears (or is within 1% rounding tolerance) in the cited chunk.
+actually appears (or is within 2% rounding tolerance) in the cited chunk.
 """
 
 from __future__ import annotations
@@ -222,6 +222,13 @@ _UNIT_DOLLAR = "dollar"
 _UNIT_MULTIPLE = "multiple"
 _UNIT_PERCENT = "percent"
 _UNIT_BPS = "bps"
+
+# Vision-extracted chart values are commonly rounded to one decimal at the
+# source while the underlying chunk text carries a slightly more precise
+# figure (e.g. "4.9x" labelled on a bar whose backing table reads "4.85x").
+# A 2% relative tolerance covers that rounding band without admitting
+# genuinely distinct values.
+_ROUNDING_TOLERANCE = 0.02
 
 # Non-financial unit words — when present, skip numeric comparison and do
 # substring presence check instead.
@@ -650,9 +657,9 @@ def _atom_found_in_chunk(
                 claim_unit_cat = _classify_unit(f"1{range_unit}")
                 if claim_unit_cat is not None and cv_unit != claim_unit_cat:
                     continue
-            if abs(cv_float - lo) < 0.001 or (lo != 0 and abs(cv_float - lo) / abs(lo) <= 0.01):
+            if abs(cv_float - lo) < 0.001 or (lo != 0 and abs(cv_float - lo) / abs(lo) <= _ROUNDING_TOLERANCE):
                 lo_seen = True
-            if abs(cv_float - hi) < 0.001 or (hi != 0 and abs(cv_float - hi) / abs(hi) <= 0.01):
+            if abs(cv_float - hi) < 0.001 or (hi != 0 and abs(cv_float - hi) / abs(hi) <= _ROUNDING_TOLERANCE):
                 hi_seen = True
         if lo_seen and hi_seen:
             return True
@@ -664,8 +671,8 @@ def _atom_found_in_chunk(
                 chunk_range_unit_cat = _classify_unit(f"1{cu}")
                 if chunk_range_unit_cat != atom_unit:
                     continue
-            lo_with_tol = clo * 0.99 if clo > 0 else clo - 0.001
-            hi_with_tol = chi * 1.01 if chi > 0 else chi + 0.001
+            lo_with_tol = clo * (1 - _ROUNDING_TOLERANCE) if clo > 0 else clo - 0.001
+            hi_with_tol = chi * (1 + _ROUNDING_TOLERANCE) if chi > 0 else chi + 0.001
             if lo_with_tol <= atom_float <= hi_with_tol:
                 return True
 
@@ -680,7 +687,7 @@ def _atom_found_in_chunk(
         if atom_unit is not None and atom_unit == cv_unit and atom_float is not None:
             cv_float = _parse_numeric(cv_norm)
             if cv_float is not None and cv_float != 0:
-                if abs(atom_float - cv_float) / abs(cv_float) <= 0.01:
+                if abs(atom_float - cv_float) / abs(cv_float) <= _ROUNDING_TOLERANCE:
                     return True
 
     # Accept negative claim against positive chunk value when absolute values
@@ -694,7 +701,7 @@ def _atom_found_in_chunk(
                 continue
             cv_float = _parse_numeric(cv_norm)
             if cv_float is not None and cv_float > 0:
-                if abs(abs_atom - cv_float) / cv_float <= 0.01:
+                if abs(abs_atom - cv_float) / cv_float <= _ROUNDING_TOLERANCE:
                     return True
 
     # "N thousand" annotation: strip and check substring presence for the
@@ -707,6 +714,31 @@ def _atom_found_in_chunk(
         bare_num = raw_num.replace(",", "")
         if bare_num in chunk_text:
             return True
+
+    # Tables render multiples and dollar amounts as bare decimals; the regex
+    # skips bare decimals to avoid matching page numbers, so substring-search
+    # the absolute value with digit-boundary guards.
+    looks_like_multiple = atom_unit == _UNIT_MULTIPLE or "x" in atom_norm.lower()
+    looks_like_dollar = atom_unit == _UNIT_DOLLAR
+    if (looks_like_multiple or looks_like_dollar) and atom_float is not None:
+        abs_val = abs(atom_float)
+        candidates: set[str] = {f"{abs_val:.2f}", f"{abs_val:.1f}"}
+        if abs_val == int(abs_val):
+            candidates.add(str(int(abs_val)))
+        # Dollar amounts ≥ 1000 are typically comma-rendered in tables; add the
+        # comma-formatted form so the substring search matches "18,402,135".
+        if looks_like_dollar and abs_val >= 1000:
+            candidates.add(f"{int(abs_val):,}")
+            if abs_val != int(abs_val):
+                candidates.add(f"{abs_val:,.2f}")
+        # Reject matches whose bare cell is immediately followed by a non-dollar
+        # unit marker so a $-prefixed claim doesn't silently match a percent or
+        # multiple cell that shares the same digits (e.g. "$94" vs "94%").
+        unit_exclusion = r"(?!\s*(?:%|bps?\b|x\b))" if looks_like_dollar else ""
+        for cand in candidates:
+            pattern = rf"(?<![\d.]){re.escape(cand)}(?![\d.]){unit_exclusion}"
+            if re.search(pattern, chunk_text):
+                return True
 
     return False
 
@@ -728,7 +760,7 @@ def check_numeric_consistency(
     3. Splits composite value strings (e.g. "86.4% (Q2), ~86.9% (Q4)") into
        atomic sub-values and verifies each atom independently.
     4. Checks whether the atomic value is present (exact normalized match,
-       within 1% rounding tolerance, range membership, or non-financial unit
+       within 2% rounding tolerance, range membership, or non-financial unit
        substring presence) in the cited chunk.
 
     Returns a list of issue dicts.  An empty list means full numeric consistency.
@@ -741,9 +773,17 @@ def check_numeric_consistency(
 
     # Index retrieved chunks by (company, date, page) for O(1) lookup.
     chunk_index: dict[tuple[str, str, int | None], RetrievedChunk] = {}
+    # Page-level index for cross-chunk re-attribution. A claim's value often
+    # lives on a co-located chunk (a same-page chart_description or table)
+    # rather than the narrative text chunk the LLM cited; the chunk-level
+    # check then misses it. Falling back to the union of values across all
+    # chunks on the same (document_id, page_number) rescues that case.
+    page_index: dict[tuple[object, int | None], list[RetrievedChunk]] = {}
     for rc in contexts:
-        key = _chunk_key(rc)
-        chunk_index[key] = rc
+        chunk_index[_chunk_key(rc)] = rc
+        if rc.chunk.page_number is not None:
+            page_key = (rc.chunk.document_id, rc.chunk.page_number)
+            page_index.setdefault(page_key, []).append(rc)
 
     issues: list[dict] = []
 
@@ -767,8 +807,15 @@ def check_numeric_consistency(
         # Unicode-normalize the chunk text once so dash variants from PDF
         # extraction match an ASCII hyphen in the claim and vice versa.
         chunk_text = _unicode_normalize(matched_rc.chunk.chunk_text or "")
-        raw_matches = FINANCIAL_NUMBER_RE.findall(chunk_text)
-        chunk_values = [m.strip() for m in raw_matches]
+        chunk_values = [m.strip() for m in FINANCIAL_NUMBER_RE.findall(chunk_text)]
+
+        co_located = page_index.get(
+            (matched_rc.chunk.document_id, matched_rc.chunk.page_number), []
+        )
+        page_text = "\n".join(
+            _unicode_normalize(rc.chunk.chunk_text or "") for rc in co_located
+        )
+        page_values = [m.strip() for m in FINANCIAL_NUMBER_RE.findall(page_text)]
 
         atoms = _split_composite_value(claim.value)
 
@@ -792,22 +839,24 @@ def check_numeric_consistency(
 
             any_atom_has_numeric = True
 
-            if not _atom_found_in_chunk(atom, chunk_text, chunk_values):
+            # Cited chunk first; on miss, widen the search to the union of
+            # all chunks on the same page of the same document.
+            found = _atom_found_in_chunk(atom, chunk_text, chunk_values)
+            if not found and page_text:
+                found = _atom_found_in_chunk(atom, page_text, page_values)
+
+            if not found:
                 all_atoms_found = False
                 if atom_is_financial:
                     failing_atom_was_financial = True
                 break
 
         if any_atom_has_numeric and not all_atoms_found:
-            # When the failing atom carries financial-numeric content AND the
-            # cited chunk extracts zero financial values of any class, the
-            # claim has no basis in the chunk at all — the chunk is likely a
-            # section header, narrative paragraph, or non-data excerpt that
-            # should not have been cited for a numeric claim. Emit a stronger
-            # issue type so downstream graders can distinguish this wrong-
-            # chunk-class case from an ordinary value mismatch.
+            # The wrong-chunk-class signal requires that NO chunk on the
+            # cited page has financial values — otherwise the cited chunk
+            # was a narrative companion and the value lives on a sibling.
             issue_type = "numeric_mismatch"
-            if failing_atom_was_financial and not chunk_values:
+            if failing_atom_was_financial and not chunk_values and not page_values:
                 issue_type = "wrong_chunk_no_financial_values"
             issues.append({
                 "type": issue_type,

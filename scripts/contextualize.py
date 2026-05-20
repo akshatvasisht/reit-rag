@@ -54,6 +54,38 @@ _INSTRUCTION = (
     "only with the succinct context and nothing else."
 )
 
+# Long table chunks get truncated by the 512-token cross-encoder reranker, so
+# entity names mid-table are invisible at scoring time. Lead the contextualized
+# prefix with explicit entities so they land in the first ~200 chars.
+_INSTRUCTION_TABLE = (
+    "Here is the chunk to situate within the full document:\n"
+    "<chunk>\n{chunk}\n</chunk>\n\n"
+    "This chunk is a table or structured data block. Write a single short "
+    "context sentence (80–120 tokens) that LEADS with the specific entities "
+    "that appear in the table — project names, company names, property names, "
+    "dollar amounts, percentages, dates — then situates the chunk within the "
+    "document. The leading entities matter because downstream retrieval scoring "
+    "may not read past the first ~200 characters of the chunk. Answer only "
+    "with the context sentence — no preamble, no labels, no quotation marks."
+)
+
+
+def _is_table_chunk(chunk_text: str, content_type: str) -> bool:
+    """Decide whether to use the table-aware contextualization prompt.
+
+    Fires on:
+    - content_type IN ('table', 'mixed') — Docling's explicit table tags
+    - long parent chunks (>3000 chars) with multiple pipe-separated rows,
+      where truncation would lose mid-table entity names
+    """
+    if content_type in ("table", "mixed"):
+        return True
+    if len(chunk_text) > 3000:
+        pipe_rows = sum(1 for line in chunk_text.split("\n") if line.count("|") >= 3)
+        if pipe_rows >= 3:
+            return True
+    return False
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -136,39 +168,44 @@ def _fetch_document_text(conn, doc_id: UUID) -> str:
 
 def _fetch_chunks_to_process(
     conn, doc_id: UUID, force: bool
-) -> list[tuple[UUID, str]]:
-    """Return (chunk_id, chunk_text) for chunks that need contextualization."""
+) -> list[tuple[UUID, str, str]]:
+    """Return (chunk_id, chunk_text, content_type) for chunks needing contextualization."""
     with conn.cursor() as cur:
         if force:
             cur.execute(
-                "SELECT id, chunk_text FROM chunks WHERE document_id = %s ORDER BY id",
+                "SELECT id, chunk_text, content_type FROM chunks WHERE document_id = %s ORDER BY id",
                 (str(doc_id),),
             )
         else:
             cur.execute(
                 """
-                SELECT id, chunk_text FROM chunks
+                SELECT id, chunk_text, content_type FROM chunks
                 WHERE document_id = %s AND contextualized_text IS NULL
                 ORDER BY id
                 """,
                 (str(doc_id),),
             )
-        return [(row[0], row[1]) for row in cur.fetchall()]
+        return [(row[0], row[1], row[2]) for row in cur.fetchall()]
 
 
 def _submit_batch(
     client,
-    chunks: list[tuple[UUID, str]],
+    chunks: list[tuple[UUID, str, str]],
     doc_text: str,
 ) -> str:
     """Submit one Message Batches API job. Returns the batch id."""
     requests = []
-    for chunk_id, chunk_text in chunks:
+    for chunk_id, chunk_text, content_type in chunks:
+        instruction_template = (
+            _INSTRUCTION_TABLE
+            if _is_table_chunk(chunk_text, content_type)
+            else _INSTRUCTION
+        )
         requests.append({
             "custom_id": str(chunk_id),
             "params": {
                 "model": CONTEXT_MODEL,
-                "max_tokens": 150,
+                "max_tokens": 200,
                 "temperature": 0.0,
                 "top_k": 1,
                 "system": CONTEXTUALIZE_SYSTEM_PROMPT,
@@ -183,7 +220,7 @@ def _submit_batch(
                             },
                             {
                                 "type": "text",
-                                "text": _INSTRUCTION.format(chunk=chunk_text),
+                                "text": instruction_template.format(chunk=chunk_text),
                             },
                         ],
                     }

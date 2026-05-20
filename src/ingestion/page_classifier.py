@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Optional
+import re
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    import anthropic
 
 
 # JSON schema constraining the LLM response to a valid class + confidence pair.
@@ -57,8 +61,22 @@ Chunk text:
 
 Return JSON with "page_content_class" (one of the four values) and "confidence" (0.0–1.0)."""
 
+# Matches a leading ```json or ``` fence (with optional whitespace) and the
+# matching trailing ``` fence; tolerant of upper/lowercase language tags.
+_FENCE_RE = re.compile(
+    r"\A\s*```[ \t]*(?:json)?[ \t]*\r?\n?(.*?)\r?\n?[ \t]*```\s*\Z",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_json_fences(text: str) -> str:
+    """Strip a surrounding ```json / ``` markdown fence pair if both are present."""
+    match = _FENCE_RE.match(text)
+    return match.group(1) if match else text
+
+
 # Lazy singleton Anthropic client for page content classification.
-_page_content_client: Optional["anthropic.Anthropic"] = None  # type: ignore[name-defined]
+_page_content_client: Optional["anthropic.Anthropic"] = None
 
 
 def _get_page_content_client():  # type: ignore[return]
@@ -102,7 +120,7 @@ def _llm_classify_page_content(chunk_text: str, section_title: str) -> dict:
         for block in response.content
         if getattr(block, "type", None) == "text"
     ).strip()
-    return json.loads(text)
+    return json.loads(_strip_json_fences(text))
 
 
 def classify_page_content(chunk_text: str, section_title: str) -> str:

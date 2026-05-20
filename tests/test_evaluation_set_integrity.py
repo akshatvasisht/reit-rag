@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import fields
 from typing import get_args
 
 from scripts import evaluate

@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import importlib
 import sys
-from contextlib import contextmanager
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,16 +35,13 @@ def _make_conn(row: tuple | None) -> MagicMock:
     return conn
 
 
-@contextmanager
-def _mock_connect(row: tuple | None):
-    conn = _make_conn(row)
-
-    @contextmanager
-    def _fake_connect():
-        yield conn
-
-    with patch("src.db.connect", side_effect=_fake_connect):
-        yield conn
+def _attach_conn(mock_connect: MagicMock, row: tuple | None) -> MagicMock:
+    """Wire an already-patched ``connect`` mock to yield a conn whose cursor
+    returns ``row`` from ``fetchone``. Returns the inner conn for assertions."""
+    mock_conn = _make_conn(row)
+    mock_connect.return_value.__enter__ = lambda s: mock_conn
+    mock_connect.return_value.__exit__ = MagicMock(return_value=False)
+    return mock_conn
 
 
 # ---------------------------------------------------------------------------
@@ -62,25 +57,15 @@ class TestVerifyContextualRetrievalActivated:
     def test_high_population_no_exception(self, capsys):
         """pct=98.0 (>=95) → no exception; confirmation line printed."""
         fn = self._import_fn()
-        row = (490, 500, 98.0)  # populated, total, pct_populated
-
         with patch("scripts.contextualize.connect") as mock_connect:
-            mock_conn = _make_conn(row)
-            mock_connect.return_value.__enter__ = lambda s: mock_conn
-            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
-
+            _attach_conn(mock_connect, (490, 500, 98.0))
             fn()  # must not raise
 
     def test_low_population_exits(self):
         """pct=40.0 (<95) → sys.exit called with message containing key text."""
         fn = self._import_fn()
-        row = (200, 500, 40.0)
-
         with patch("scripts.contextualize.connect") as mock_connect:
-            mock_conn = _make_conn(row)
-            mock_connect.return_value.__enter__ = lambda s: mock_conn
-            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
-
+            _attach_conn(mock_connect, (200, 500, 40.0))
             with pytest.raises(SystemExit) as exc_info:
                 fn()
 
@@ -91,37 +76,22 @@ class TestVerifyContextualRetrievalActivated:
     def test_zero_total_no_exception(self):
         """total=0 → warning printed, no exception raised."""
         fn = self._import_fn()
-        row = (0, 0, None)  # pct is NULL when total=0
-
         with patch("scripts.contextualize.connect") as mock_connect:
-            mock_conn = _make_conn(row)
-            mock_connect.return_value.__enter__ = lambda s: mock_conn
-            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
-
+            _attach_conn(mock_connect, (0, 0, None))  # pct is NULL when total=0
             fn()  # must not raise
 
     def test_exactly_95_percent_no_exception(self):
         """pct=95.0 exactly (boundary inclusive) → no exception."""
         fn = self._import_fn()
-        row = (475, 500, 95.0)
-
         with patch("scripts.contextualize.connect") as mock_connect:
-            mock_conn = _make_conn(row)
-            mock_connect.return_value.__enter__ = lambda s: mock_conn
-            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
-
+            _attach_conn(mock_connect, (475, 500, 95.0))
             fn()  # must not raise
 
     def test_94_9_percent_exits(self):
         """pct=94.9 (just below threshold) → sys.exit."""
         fn = self._import_fn()
-        row = (474, 500, 94.9)
-
         with patch("scripts.contextualize.connect") as mock_connect:
-            mock_conn = _make_conn(row)
-            mock_connect.return_value.__enter__ = lambda s: mock_conn
-            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
-
+            _attach_conn(mock_connect, (474, 500, 94.9))
             with pytest.raises(SystemExit):
                 fn()
 
@@ -139,14 +109,9 @@ class TestCheckContextualActivationAtStartup:
     def test_high_population_no_warning(self):
         """pct=98.0 → logger.warning NOT called."""
         fn = self._get_fn()
-        row = (490, 500, 98.0)
-
         with patch("src.retrieval.pipeline.logger") as mock_logger, \
              patch("src.db.connect") as mock_connect:
-            mock_conn = _make_conn(row)
-            mock_connect.return_value.__enter__ = lambda s: mock_conn
-            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
-
+            _attach_conn(mock_connect, (490, 500, 98.0))
             fn()
 
         mock_logger.warning.assert_not_called()
@@ -154,14 +119,9 @@ class TestCheckContextualActivationAtStartup:
     def test_low_population_emits_warning(self):
         """pct=50.0 → logger.warning called with text mentioning '50' and 'COALESCE'."""
         fn = self._get_fn()
-        row = (250, 500, 50.0)
-
         with patch("src.retrieval.pipeline.logger") as mock_logger, \
              patch("src.db.connect") as mock_connect:
-            mock_conn = _make_conn(row)
-            mock_connect.return_value.__enter__ = lambda s: mock_conn
-            mock_connect.return_value.__exit__ = MagicMock(return_value=False)
-
+            _attach_conn(mock_connect, (250, 500, 50.0))
             fn()
 
         mock_logger.warning.assert_called_once()

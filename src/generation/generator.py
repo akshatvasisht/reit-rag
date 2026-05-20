@@ -33,7 +33,7 @@ from src.generation.prompts import (
     render_abstention,
 )
 from src.models import Claim, RetrievedChunk, StructuredAnswer
-from src.retrieval.pipeline import RetrievalResult, retrieve
+from src.retrieval.pipeline import retrieve
 from src.versioning.classifier import TemporalIntent
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,11 @@ _FL_QUERY_PATTERN = re.compile(
     r"projection|projections|projected|"
     r"forecast|forecasted|"
     r"expected\s+(?:to|for)|"  # "expected to" or "expected for" — avoids "what was expected"
-    r"forward[-\s]looking"
+    r"forward[-\s]looking|"
+    r"year[-\s]end\s+20\d{2}|"
+    r"plan(?:s|ning|ned)?\s+to|"
+    r"intend(?:s|ing|ed)?\s+to|"
+    r"aim(?:s|ing|ed)?\s+to"
     r")\b",
     re.IGNORECASE,
 )

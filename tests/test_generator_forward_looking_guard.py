@@ -13,10 +13,9 @@ Test design:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 from uuid import uuid4
 
-import pytest
 
 from src.generation import generator
 from src.models import Chunk, RetrievedChunk, StructuredAnswer
@@ -143,6 +142,54 @@ def test_detect_forward_looking_intent_negative_occupancy_query() -> None:
     assert _is_forward_looking_query("What is BXP's portfolio occupancy?") is False
 
 
+def test_detect_forward_looking_intent_year_end_future_anchor() -> None:
+    """Date-anchored future reference 'year-end 2027' is forward-looking."""
+    from src.generation.generator import _is_forward_looking_query
+    assert _is_forward_looking_query("Will BXP deleverage to year-end 2027?") is True
+
+
+def test_detect_forward_looking_intent_plan_to_verb() -> None:
+    """'plans to <verb>' is a forward-intent construction."""
+    from src.generation.generator import _is_forward_looking_query
+    assert _is_forward_looking_query("Does BXP plan to refinance its 2027 maturities?") is True
+
+
+def test_detect_forward_looking_intent_intends_to_verb() -> None:
+    """'intends to <verb>' is a forward-intent construction."""
+    from src.generation.generator import _is_forward_looking_query
+    assert _is_forward_looking_query("Realty Income intends to expand into Europe.") is True
+
+
+def test_detect_forward_looking_intent_aim_to_verb() -> None:
+    """'aim to <verb>' is a forward-intent construction."""
+    from src.generation.generator import _is_forward_looking_query
+    assert _is_forward_looking_query("Does DLR aim to grow data center capacity?") is True
+
+
+def test_detect_forward_looking_intent_plans_to_with_year_end_anchor() -> None:
+    """Combined plan-to + year-end anchor remains forward-looking."""
+    from src.generation.generator import _is_forward_looking_query
+    assert _is_forward_looking_query("BXP plans to deleverage to year-end 2027.") is True
+
+
+def test_detect_forward_looking_intent_negative_aimless_query() -> None:
+    """'aimless' must not trigger the 'aim to' verb pattern — NEGATIVE test."""
+    from src.generation.generator import _is_forward_looking_query
+    assert _is_forward_looking_query("This is an aimless query about BXP.") is False
+
+
+def test_detect_forward_looking_intent_negative_planning_meeting() -> None:
+    """'planning meeting' must not trigger the 'plan to' verb pattern — NEGATIVE test."""
+    from src.generation.generator import _is_forward_looking_query
+    assert _is_forward_looking_query("BXP held a planning meeting yesterday.") is False
+
+
+def test_detect_forward_looking_intent_negative_past_year_end() -> None:
+    """A bare 'year-end' without a year anchor must not fire — NEGATIVE test."""
+    from src.generation.generator import _is_forward_looking_query
+    assert _is_forward_looking_query("What was BXP's year-end occupancy?") is False
+
+
 # ---------------------------------------------------------------------------
 # chunks_have_forward_looking_support (unit tests)
 # ---------------------------------------------------------------------------
@@ -228,7 +275,7 @@ def test_system_prompt_gets_fl_injection_when_query_is_guidance_and_chunks_lack_
     ))
     monkeypatch.setattr(generator, "check_numeric_consistency", lambda *a, **k: [])
 
-    result = generator.answer("What is BXP's 2025 FFO guidance?")
+    generator.answer("What is BXP's 2025 FFO guidance?")
 
     assert len(captured_system) == 1, "system_prompt_override must be passed when FL guard fires"
     injected = captured_system[0]
@@ -244,7 +291,6 @@ def test_no_fl_injection_when_chunks_have_guidance_language(monkeypatch) -> None
     The corpus-aware prompt is always passed, but the forward-looking-absent block
     must be absent when chunks already contain forward-looking language.
     """
-    from src.generation.generator import _FL_ABSENT_INSTRUCTION
 
     ctx = [_make_chunk(text="Management guided 2026 FFO of $7.10–$7.30 per share.")]
     retrieval = _make_retrieval(ctx, query="What is BXP's 2026 FFO guidance?")
@@ -278,7 +324,6 @@ def test_no_fl_injection_for_non_forward_looking_query(monkeypatch) -> None:
     FL-absent instruction injected. This is the critical negative test: the guard
     must not over-refuse on historical queries even when chunks lack FL language.
     """
-    from src.generation.generator import _FL_ABSENT_INSTRUCTION
 
     # Same chunks as the forward-looking test — but query is historical
     ctx = [_make_chunk(text="BXP reported FFO of $7.10 per share for full-year 2025.")]

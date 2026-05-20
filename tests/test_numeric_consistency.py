@@ -21,10 +21,12 @@ def _make_chunk(
     report_date: str = "2026-03",
     page_number: int = 5,
     chunk_text: str = "",
+    document_id=None,
+    content_type: str = "text",
 ) -> Chunk:
     return Chunk(
         id=uuid4(),
-        document_id=uuid4(),
+        document_id=document_id if document_id is not None else uuid4(),
         company=company,
         ticker="ACM",
         doc_type="investor_presentation",
@@ -33,7 +35,7 @@ def _make_chunk(
         doc_version=report_date,
         section_title="Financials",
         page_number=page_number,
-        content_type="text",
+        content_type=content_type,  # type: ignore[arg-type]
         chunk_text=chunk_text,
     )
 
@@ -84,8 +86,8 @@ def test_verbatim_match_produces_no_issue() -> None:
 
 
 def test_within_one_percent_tolerance_produces_no_issue() -> None:
-    """A claim value within 1% of a chunk value is accepted (rounding tolerance)."""
-    # Chunk has 94.1%, claim says 94.0% — difference is ~0.11%, within 1%.
+    """A claim value within rounding tolerance of a chunk value is accepted."""
+    # Chunk has 94.1%, claim says 94.0% — difference is ~0.11%.
     chunk = _make_chunk(chunk_text="Occupancy rate reached 94.1% this quarter.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("Occupancy was approximately 94.0%.", value="94.0%")
@@ -546,7 +548,7 @@ def test_composite_comma_parenthetical_period_both_present_no_mismatch() -> None
 def test_composite_comma_parenthetical_one_atom_missing_reports_mismatch() -> None:
     """'86.4% (Q2 2025), ~76.3% (Q4 2025)' — 76.3% absent from chunk → mismatch.
 
-    Values chosen >1% apart so the 1% rounding tolerance does not mask the miss.
+    Values chosen far apart so the rounding tolerance does not mask the miss.
     """
     chunk = _make_chunk(chunk_text="Occupancy was 86.4% in Q2 2025.")
     contexts = [_make_rc(chunk)]
@@ -614,3 +616,172 @@ def test_composite_with_paren_negative_dollar_splits_and_resolves() -> None:
     claim = _make_claim("Net positions.", value="$100M, $(50M)")
     issues = check_numeric_consistency(_make_answer([claim]), contexts)
     assert issues == [], f"Unexpected issues: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Page-level cross-chunk re-attribution rescue
+# ---------------------------------------------------------------------------
+
+
+def test_value_on_sibling_chunk_same_page_does_not_mismatch() -> None:
+    """LLM cites the narrative text chunk on page N; the value lives on a
+    same-page chart_description sibling. Page-level rescue must pass."""
+    doc_id = uuid4()
+    text_chunk = _make_chunk(
+        chunk_text="Net debt of $16,774M and EBITDA of $3,427M.",
+        document_id=doc_id,
+        page_number=34,
+    )
+    chart_chunk = _make_chunk(
+        chunk_text="Leverage chart: 4.9x Net Debt / LQA Adjusted EBITDA.",
+        document_id=doc_id,
+        page_number=34,
+        content_type="chart_description",
+    )
+    contexts = [_make_rc(text_chunk), _make_rc(chart_chunk)]
+    claim = _make_claim("Net debt to EBITDA was 4.9x.", value="4.9x", page=34)
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Page-level rescue should pass 4.9x; got: {issues}"
+
+
+def test_value_not_on_any_same_page_chunk_still_mismatches() -> None:
+    """Page-level rescue must not be a free pass: when the value is absent
+    from every same-page chunk, the mismatch still fires."""
+    doc_id = uuid4()
+    text_chunk = _make_chunk(
+        chunk_text="Net debt of $16,774M and EBITDA of $3,427M.",
+        document_id=doc_id,
+        page_number=34,
+    )
+    chart_chunk = _make_chunk(
+        chunk_text="Leverage chart: 4.9x Net Debt / LQA Adjusted EBITDA.",
+        document_id=doc_id,
+        page_number=34,
+        content_type="chart_description",
+    )
+    contexts = [_make_rc(text_chunk), _make_rc(chart_chunk)]
+    claim = _make_claim("Net debt to EBITDA was 7.2x.", value="7.2x", page=34)
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert any(i.get("type") == "numeric_mismatch" for i in issues), (
+        f"Genuine mismatch must still fire; got: {issues}"
+    )
+
+
+def test_page_rescue_only_unions_same_document() -> None:
+    """Two chunks on the same page number but in different documents must
+    NOT cross-rescue each other (page_index is keyed on document_id too)."""
+    doc_a = uuid4()
+    doc_b = uuid4()
+    cited = _make_chunk(
+        chunk_text="No financial values here, only narrative prose.",
+        document_id=doc_a,
+        page_number=34,
+        report_date="2026-03",
+    )
+    other_doc_same_page = _make_chunk(
+        chunk_text="4.9x leverage in a totally unrelated document.",
+        document_id=doc_b,
+        page_number=34,
+        report_date="2025-12",
+    )
+    contexts = [_make_rc(cited), _make_rc(other_doc_same_page)]
+    claim = _make_claim("Net debt to EBITDA was 4.9x.", value="4.9x", page=34, date="March 2026")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert any(i.get("type") in ("numeric_mismatch", "wrong_chunk_no_financial_values") for i in issues), (
+        f"Cross-document same-page must not rescue; got: {issues}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chart-derived value precision
+# ---------------------------------------------------------------------------
+
+
+def test_chart_rounded_multiple_within_two_percent_matches() -> None:
+    """Chart-labelled '4.9x' matches an underlying chunk value of '4.85x' (~1.03% off)."""
+    chunk = _make_chunk(chunk_text="Net debt-to-EBITDA was 4.85x at quarter end.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Leverage was 4.9x.", value="4.9x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_chart_rounded_percent_within_two_percent_matches() -> None:
+    """Chart-labelled '12.5%' matches an underlying chunk value of '12.7%' (~1.57% off)."""
+    chunk = _make_chunk(chunk_text="Operating margin of 12.7% for the period.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Margin was 12.5%.", value="12.5%")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Unexpected issues: {issues}"
+
+
+def test_value_outside_two_percent_still_mismatches() -> None:
+    """A claim outside the rounding band remains a mismatch."""
+    chunk = _make_chunk(chunk_text="Leverage was 4.5x at quarter end.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Leverage was 4.9x.", value="4.9x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1, f"Expected 1 issue, got: {issues}"
+    assert issues[0]["type"] == "numeric_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# Bare-decimal-in-table rescue for multiple-format claims
+# ---------------------------------------------------------------------------
+
+
+def test_bare_decimal_in_table_matches_multiple_claim() -> None:
+    """Leverage-walk tables render multiples as bare decimals ('| 8.18 |')
+    without the 'x' suffix. A claim of '8.18x' must still match."""
+    chunk = _make_chunk(chunk_text="| Leverage |           8.18 |\n| Target |           7.08 |")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("BXP leverage stands at 8.18x.", value="8.18x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Bare-decimal table rescue should pass 8.18x; got: {issues}"
+
+
+def test_bare_decimal_in_table_matches_negative_multiple_claim() -> None:
+    """Accounting-negative claim '(0.60x)' matches a bare '0.60' table cell —
+    the sign is implicit from the column header (e.g., 'Reduction')."""
+    chunk = _make_chunk(chunk_text="| Asset Sales | 0.60 |\n| Dividend Reset | 0.25 |")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Asset sales reduce leverage by (0.60x).", value="(0.60x)")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Bare-decimal rescue should accept (0.60x) vs '0.60'; got: {issues}"
+
+
+def test_bare_decimal_does_not_match_inside_longer_number() -> None:
+    """Bare-decimal search must respect digit boundaries — '8.18' must not
+    match the '8.18' inside '8.180' or '18.18'."""
+    chunk = _make_chunk(chunk_text="Spread 18.180 bps; throughput 28.18.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Leverage is 8.18x.", value="8.18x")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert any(i.get("type") == "numeric_mismatch" for i in issues), (
+        f"Boundary check must prevent false match; got: {issues}"
+    )
+
+
+def test_bare_decimal_in_table_matches_dollar_per_share_claim() -> None:
+    """Per-share reconciliation tables render dollar figures as bare decimals
+    ('| 4.28 |') without the '$' prefix. A claim of '$4.28' must still match."""
+    chunk = _make_chunk(chunk_text="| AFFO per share (Diluted) | 4.28 | 4.19 | 4.00 |")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Realty Income's full year 2025 AFFO per share was $4.28.",
+                        value="$4.28")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"Dollar-table rescue should pass $4.28; got: {issues}"
+
+
+def test_bare_decimal_in_table_matches_comma_formatted_large_dollar() -> None:
+    """Balance-sheet tables render large dollar amounts comma-formatted
+    ('| 18,402,135 |'). A claim of '$18,402,135' must match the bare cell."""
+    chunk = _make_chunk(
+        chunk_text="| Total debt at balance sheet carrying value | 18,402,135 |"
+    )
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("Total debt was $18,402,135.", value="$18,402,135")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], (
+        f"Dollar-table rescue should pass comma-formatted $18,402,135; got: {issues}"
+    )

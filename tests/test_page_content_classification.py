@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from src.ingestion.chunker import classify_page_content
 from src.retrieval.bm25 import (

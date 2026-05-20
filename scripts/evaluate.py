@@ -13,17 +13,17 @@ Usage:
     python scripts/evaluate.py --ablation --ragas       # full report with ablation + RAGAS status
     python scripts/evaluate.py --out report             # write markdown report
     python scripts/evaluate.py --ablation-reranker --ablation-model cross-encoder/ms-marco-MiniLM-L-12-v2
+    python scripts/evaluate.py --ablation-rerank-budgets    # grid-search per-intent rerank top-K
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import re
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -31,8 +31,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.generation.generator import Answer, answer
-from src.corpus_registry import CORPUS_REGISTRY
-from src.retrieval.pipeline import RetrievalResult, confidence_band, retrieve
+from src.retrieval.pipeline import RetrievalResult, confidence_band
 from tests.evaluation_set import EVALUATION_SET, EvaluationQuery
 
 
@@ -178,11 +177,12 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
     # refusal phrase at the tail of substantive content does not count, but
     # an answer that opens with "X does not contain Y" and then explains the
     # adjacent context that IS disclosed is a textbook soft refusal and
-    # passes. The positional check (first 400 chars) is the discriminator
-    # between leading-refusal and trailing-hedge. The window is sized so
-    # answers that lead with a brief framing clause before the refusal
-    # ("As reflected in the deck, ... 2025 guidance was not reaffirmed at
-    # Investor Day") still register as leading rather than trailing.
+    # passes. The discriminator: search only the first three sentences. This
+    # tolerates a brief framing clause + bridge sentence ahead of the refusal
+    # but rejects hedges buried at the tail of a long answer, regardless of
+    # total length. Three sentences accommodates the financial-answer pattern
+    # "[asked-for thing is not in deck]. [What deck does report]. [Why the
+    # asked-for thing was not updated/reaffirmed]."
     soft_refusal_check = None
     if gq.expect_soft_refusal:
         _soft_refusal_phrases = (
@@ -205,14 +205,12 @@ def _grade(gq: EvaluationQuery, a: Answer) -> EvaluationResult:
             soft_refusal_check = True
         else:
             text_lower = a.text.lower()
-            head = text_lower[:400]
-            # Pass if any refusal phrase appears in the first 400 chars
-            # (literal substring match for the simple phrases; regex for the
-            # one wildcard pattern).
+            sentences = re.split(r"[.!?]\s+", text_lower)
+            lead = " ".join(sentences[:3])
             literal_phrases = [p for p in _soft_refusal_phrases if ".*" not in p]
             regex_phrases = [p for p in _soft_refusal_phrases if ".*" in p]
-            has_leading_refusal = any(p in head for p in literal_phrases) or any(
-                re.search(p, head) for p in regex_phrases
+            has_leading_refusal = any(p in lead for p in literal_phrases) or any(
+                re.search(p, lead) for p in regex_phrases
             )
             soft_refusal_check = has_leading_refusal
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import TYPE_CHECKING, Iterator, Optional, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import tiktoken
 
@@ -37,6 +37,18 @@ CHILD_MAX_TOKENS: int = 320
 # or after a newline sequence. Avoids splitting on common abbreviations by
 # requiring the next character to be uppercase or end-of-string.
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"])|(?<=\n)\s*(?=\S)")
+
+# Header line that introduces a footnote/endnote/references block. Must match
+# the *entire* first non-empty line so generic prose like "Note: ..." is not
+# treated as a footnote section.
+_FOOTNOTE_HEADER_RE = re.compile(
+    r"^(?:footnotes?|notes|references|endnotes)\s*[:.\-]?\s*$",
+    re.IGNORECASE,
+)
+
+# Leading numeric marker on an already-numbered footnote item, e.g. "(1) ",
+# "(1. ", "1. ", "1) ". Used as an idempotency guard.
+_NUMBERED_PREFIX_RE = re.compile(r"^\s*(?:\(\d+[.)]?|\d+[.)])\s+")
 
 
 class ParsedBlock(Protocol):
@@ -255,6 +267,50 @@ def _dominant_content_type(blocks: list[ParsedBlock]) -> ContentType:
     return "mixed"
 
 
+def _restore_footnote_numbering(text: str) -> str:
+    """Re-prefix footnote body blocks with ``(1)``, ``(2)``, … markers.
+
+    Docling occasionally strips the leading ``(N)`` markers from Footnotes /
+    Notes / References / Endnotes sections during PDF parsing, leaving the
+    items as bare paragraphs and destroying inline ``(n)`` cross-references.
+    This helper detects that case and re-numbers the body blocks in order.
+    """
+    if not text:
+        return text
+
+    blocks = text.split("\n\n")
+    # Locate the first non-empty block; it must be a footnote-section header.
+    header_idx = -1
+    for i, blk in enumerate(blocks):
+        if blk.strip():
+            header_idx = i
+            break
+    if header_idx == -1:
+        return text
+    if not _FOOTNOTE_HEADER_RE.match(blocks[header_idx].strip()):
+        return text
+
+    body = blocks[header_idx + 1:]
+    # Idempotency: bail out if any body block already carries a numeric marker.
+    for blk in body:
+        if blk.strip() and _NUMBERED_PREFIX_RE.match(blk):
+            return text
+
+    n = 0
+    renumbered: list[str] = []
+    for blk in body:
+        if blk.strip():
+            n += 1
+            renumbered.append(f"({n}) {blk.lstrip()}")
+        else:
+            renumbered.append(blk)
+
+    if n == 0:
+        return text
+
+    return "\n\n".join(blocks[: header_idx + 1] + renumbered)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -311,6 +367,7 @@ def chunk_document(
 
         for parent_blocks in parent_groups:
             parent_text = "\n\n".join(b.text for b in parent_blocks)
+            parent_text = _restore_footnote_numbering(parent_text)
             parent_page = parent_blocks[0].page_number
             parent_content_type = _dominant_content_type(parent_blocks)
 

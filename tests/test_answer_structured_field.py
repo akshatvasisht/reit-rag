@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.generation.generator import Answer, answer, answer_structured
+from src.generation.generator import answer, answer_structured
 from src.models import Chunk, RetrievedChunk, StructuredAnswer
 from src.retrieval.pipeline import RetrievalResult
 

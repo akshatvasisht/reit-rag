@@ -129,10 +129,35 @@ def test_soft_refusal_pass_on_lead_then_adjacent_context():
     assert "soft_refusal" in result.auto_pass_reasons
 
 
+def test_soft_refusal_pass_when_refusal_in_third_sentence():
+    """Financial answers commonly use the pattern:
+    [asked-for thing is not in deck] → [bridge sentence with actual reported
+    number] → [explanation of why the asked-for thing was not reaffirmed].
+    The refusal language often lands in sentence 3, not 1 or 2. The grader
+    must accept this — anchored on the g27 BXP-2025-FFO-guidance answer."""
+    gq = _query_with_soft_refusal()
+    answer_text = (
+        "The retrieved documents surface guidance for full year 2026, not 2025. "
+        "Specifically, BXP's full year 2026 FFO per diluted share guidance is a "
+        "range of $6.88 to $7.04, midpoint $6.96. "
+        "Regarding 2025 specifically: the Investor Day Session deck notes that "
+        "projections for full year 2025 were not updated or reaffirmed at the "
+        "conference."
+    )
+    a = _FakeAnswer(
+        text=answer_text,
+        abstained=False,
+        diagnostics={"top_rerank_score": 7.14, "retrieval_confidence": 0.52},
+        contexts=[RetrievedChunk(chunk=_make_chunk(), rerank_score=7.14)],
+    )
+    result = _grade(gq, a)
+    assert "soft_refusal" in result.auto_pass_reasons
+
+
 def test_soft_refusal_fail_when_hedge_buried_at_tail():
-    """An answer that asserts substantive content first and then appends a
-    refusal hedge at the tail should NOT pass — the prior over-permissive
-    grader let these through. The positional first-400-chars check rejects."""
+    """An answer that leads with substantive content and only hedges at the
+    tail must fail the soft-refusal check; the grader inspects only the
+    first three sentences for refusal-shaped language."""
     gq = _query_with_soft_refusal()
     substantive_lead = (
         "DLR has a $4.2B revolving credit facility with a $2.0B accordion "

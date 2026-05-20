@@ -7,13 +7,11 @@ inserted before any child references them — no second pass needed.
 from __future__ import annotations
 
 import logging
-from typing import Iterable
 from uuid import UUID
 
 import numpy as np
 from pgvector.psycopg import register_vector
 from psycopg import Connection
-from psycopg.types.json import Json
 
 from src.models import Chunk, DocumentMeta
 

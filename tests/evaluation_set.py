@@ -17,7 +17,7 @@ pass/fail plus aggregate Recall@K and MRR over the expected retrieval signal.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 PassCategory = Literal[
