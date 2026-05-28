@@ -126,8 +126,8 @@ def _empty_hop_result(query: str = "sub-q") -> RetrievalResult:
 def test_duplicate_subquery_exact_match_skips_second_hop() -> None:
     """When Haiku proposes an identical sub-query to the original query, the hop is skipped.
 
-    Evidence: bxp-morn-basic-1 and xdoc-basic-1 both show sub_queries repeated identically.
-    Probe xdoc-adv-6 shows: sub_queries = ["Simon mall property tax expense",
+    Example: a hop whose proposed sub_query exactly repeats the original, e.g.
+    sub_queries = ["Simon mall property tax expense",
     "Simon mall property tax expense"].
     """
     from src.retrieval.adaptive import adaptive_retrieve
@@ -220,7 +220,7 @@ def test_duplicate_subquery_whitespace_collapsed_skips_hop() -> None:
 def test_near_duplicate_high_token_overlap_skips_hop() -> None:
     """>=90% Jaccard token overlap causes the second hop to be skipped.
 
-    e.g. xdoc-adv-6: original="Simon mall property tax expense",
+    e.g. original="Simon mall property tax expense",
     hop-2 sub_query="Simon mall property tax expense" — exact duplicate.
     Here we test a near-duplicate with 90%+ Jaccard overlap.
 

@@ -1,4 +1,4 @@
-"""Cross-encoder reranker using ms-marco-MiniLM-L-6-v2 (sentence-transformers)."""
+"""Cross-encoder reranker using bge-reranker-v2-m3 in raw-logit mode (sentence-transformers)."""
 
 from __future__ import annotations
 
@@ -6,54 +6,31 @@ import logging
 from typing import Any, cast
 
 import numpy as np
+import torch
 from sentence_transformers import CrossEncoder
 
 from src.models import RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Module-level singleton — loaded lazily on first rerank call so importing this
-# module does not require network/model availability.
-# ---------------------------------------------------------------------------
-# MS MARCO MiniLM cross-encoder; calibrated for this corpus via the gate
-# threshold below rather than by model swap — see ARCHITECTURE.md
-# "Rerank gate calibration and the domain-mismatch decision tree" for the
-# rationale and the measurement preconditions for any future model change.
-_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# Module-level singleton, loaded lazily on first rerank call.
+# Configured to emit raw logits (see _configure_raw_logits) instead of the
+# default sigmoid, which saturates near 1.0 on this corpus and collapses
+# ranking separation.
+_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 # Pinned commit SHA — supply-chain mitigation against an upstream model swap.
-_MODEL_REVISION = "c5ee24cb16019beea0893ab7796b1df96625c6b8"
+_MODEL_REVISION = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
 _cross_encoder: CrossEncoder | None = None
 
-# ---------------------------------------------------------------------------
-# Registry for on-demand model loading (used by the evaluation harness only).
-# Keys are (model_name, revision) tuples; values are loaded CrossEncoder
-# instances. The default singleton above is managed separately to avoid any
-# change to production load-time behaviour.
-# ---------------------------------------------------------------------------
+# Registry for loading alternate reranker models by (name, revision), used by
+# rerank_with_model. Kept separate from the default singleton so production
+# load-time behaviour is unchanged.
 _registry: dict[tuple[str, str | None], CrossEncoder] = {}
 
-# Chunks whose rerank_score falls below this threshold are considered
-# irrelevant and trigger the abstention gate.
-#
-# ms-marco-MiniLM-L-6-v2 outputs raw logits (not sigmoid-bounded
-# probabilities). Relevant passages typically score in the range [0, 12];
-# clearly irrelevant pairs often score negative (e.g. -8 to -2).
-#
-# This threshold is intentionally permissive because raw logits can skew
-# negative even for relevant contexts in natural-language query settings.
-# The negative-logit bias is a training-distribution effect (MS MARCO is a
-# web-search corpus; REIT financial passages are out of distribution); see
-# ARCHITECTURE.md "Rerank gate calibration and the domain-mismatch decision
-# tree" for the calibration procedure and the decision tree for future changes.
-#
-# Empirical anchor (28-query eval set): the only query with top_rerank_score
-# below -5.0 is g21 (EGP leasing-spread trend), which has no on-topic chunk
-# in the candidate pool — abstention is the correct decision there. Queries
-# scoring in (-5.0, 0] succeed when an LLM-level abstain guard fires instead.
-# A tighter threshold (e.g. -2.0) would not change observed pass/abstain
-# outcomes on this corpus; a looser one (e.g. -8.0) would silence the only
-# retrieval-side abstain that fires today.
+# Chunks scoring below this threshold are treated as irrelevant and trigger the
+# abstention gate. In raw-logit mode bge-reranker-v2-m3 assigns even off-topic
+# chunks mildly positive scores on this corpus, so this floor rarely fires: it
+# is a backstop, and abstention is driven by the LLM-side guard.
 RERANK_THRESHOLD: float = -5.0
 
 # Content types whose `chunk_text` is free-form prose emitted by the vision
@@ -85,11 +62,33 @@ def _passage_for_rerank(rc: RetrievedChunk) -> str:
     return base
 
 
+def _configure_raw_logits(encoder: CrossEncoder) -> CrossEncoder:
+    """Force the cross-encoder to emit raw logits instead of its default
+    activation.
+
+    bge-reranker-v2-m3 defaults to a sigmoid that saturates near 1.0 on this
+    corpus, collapsing the score separation the gate and confidence scoring
+    rely on. Setting an identity activation restores the raw-logit ranking
+    signal. This is a no-op for models that already emit logits (e.g. the
+    ms-marco cross-encoders), so it is safe to apply unconditionally.
+    """
+    identity = torch.nn.Identity()
+    # Prefer the current attribute name; `default_activation_function` is a
+    # deprecated alias on newer sentence-transformers.
+    if hasattr(encoder, "activation_fn"):
+        encoder.activation_fn = identity
+    elif hasattr(encoder, "default_activation_function"):
+        setattr(encoder, "default_activation_function", identity)
+    return encoder
+
+
 def _get_cross_encoder() -> CrossEncoder:
     """Return the reranker singleton, loading it on first use."""
     global _cross_encoder
     if _cross_encoder is None:
-        _cross_encoder = CrossEncoder(_MODEL_NAME, revision=_MODEL_REVISION)
+        _cross_encoder = _configure_raw_logits(
+            CrossEncoder(_MODEL_NAME, revision=_MODEL_REVISION)
+        )
     return _cross_encoder
 
 
@@ -105,7 +104,7 @@ def _get_registry_encoder(model_name: str, revision: str | None) -> CrossEncoder
             kwargs: dict[str, Any] = {}
             if revision is not None:
                 kwargs["revision"] = revision
-            _registry[key] = CrossEncoder(model_name, **kwargs)
+            _registry[key] = _configure_raw_logits(CrossEncoder(model_name, **kwargs))
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load cross-encoder model '{model_name}'"
@@ -113,6 +112,32 @@ def _get_registry_encoder(model_name: str, revision: str | None) -> CrossEncoder
                 + f": {exc}"
             ) from exc
     return _registry[key]
+
+
+# Cap the cross-encoder batch so peak VRAM stays within a small shared GPU
+# (e.g. a 6 GB laptop card). Attention memory scales with batch_size * seq_len^2,
+# and the comparison / synthesis paths rerank the full fused pool more than once
+# per query, so an unbounded batch can exhaust VRAM mid-run.
+_RERANK_BATCH_SIZE = 8
+
+
+def _predict_scores(model: CrossEncoder, pairs: list[tuple[str, str]]) -> list[float]:
+    """Score *pairs* with the cross-encoder and return raw logits as floats.
+
+    Uses a bounded batch size and releases the CUDA caching allocator after
+    scoring so repeated reranks within a single query do not accumulate VRAM on
+    a memory-constrained GPU.
+    """
+    raw_scores = model.predict(cast(Any, pairs), batch_size=_RERANK_BATCH_SIZE)
+    if isinstance(raw_scores, np.ndarray):
+        scores = raw_scores.tolist()
+    elif hasattr(raw_scores, "tolist"):
+        scores = raw_scores.tolist()
+    else:
+        scores = list(raw_scores)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return [float(s) for s in scores]
 
 
 def rerank_with_model(
@@ -139,13 +164,7 @@ def rerank_with_model(
     pairs: list[tuple[str, str]] = [(query, _passage_for_rerank(rc)) for rc in candidates]
 
     model = _get_registry_encoder(model_name, revision)
-    raw_scores = model.predict(cast(Any, pairs))
-    if isinstance(raw_scores, np.ndarray):
-        scores = raw_scores.tolist()
-    elif hasattr(raw_scores, "tolist"):
-        scores = raw_scores.tolist()
-    else:
-        scores = list(raw_scores)
+    scores = _predict_scores(model, pairs)
 
     for rc, score in zip(candidates, scores):
         rc.rerank_score = float(score)
@@ -196,14 +215,7 @@ def rerank(
     pairs: list[tuple[str, str]] = [(query, _passage_for_rerank(rc)) for rc in candidates]
 
     model = _get_cross_encoder()
-    # predict() can return ndarray or tensor depending on backend/config.
-    raw_scores = model.predict(cast(Any, pairs))
-    if isinstance(raw_scores, np.ndarray):
-        scores = raw_scores.tolist()
-    elif hasattr(raw_scores, "tolist"):
-        scores = raw_scores.tolist()
-    else:
-        scores = list(raw_scores)
+    scores = _predict_scores(model, pairs)
 
     for rc, score in zip(candidates, scores):
         rc.rerank_score = float(score)

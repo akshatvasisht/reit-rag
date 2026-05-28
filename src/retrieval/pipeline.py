@@ -24,7 +24,7 @@ from src.retrieval.entity_filter import extract_companies
 from src.retrieval.fusion import rrf_fuse
 from src.retrieval.reranker import RERANK_THRESHOLD, rerank
 from src.retrieval.synthesis import retrieve_all_company_synthesis
-from src.retrieval.vector import vector_search
+from src.retrieval.vector import fetch_embeddings_by_ids, vector_search
 from src.versioning.chains import dedupe_by_version_group, expand_to_parents, version_group_key
 from src.versioning.classifier import TemporalIntent, classify_intent_full
 
@@ -102,6 +102,7 @@ RRF_K = 60                      # standard RRF constant
 ENTITY_ANCHOR_MAX = 3           # cap on chunks promoted by entity-anchor boost
 MAX_CHUNKS_PER_PAGE = 3         # per (document_id, page_number) cap after expansion
 VERSION_FLOOR_MAX = 2           # max chunks injected per missing version group
+SUBTYPE_FLOOR_MAX = 1           # max chunks injected per missing (company, doc_subtype)
 PER_VERSION_K_COMPARISON = 4    # top-K per version group for comparison/conflict intents
 
 # Proper-noun-shaped anchor extraction from the query. Each token must be
@@ -158,6 +159,31 @@ CONFLICT_SCORE_OFFSET = 0.1
 # is considered borderline; chunks in this band trigger adjacent-page sibling
 # fetches because the answer may live on the immediately preceding or following page.
 SIBLING_BORDERLINE_WIDTH = 3.0
+
+# Maximal Marginal Relevance — diversity-aware re-selection over the reranked
+# candidate pool. MMR trades relevance against novelty so a complementary-facet
+# chunk that is present in the pool but outranked by top-relevance near-
+# duplicates can still reach the retained set.
+#
+# Lambda is deliberately relevance-dominant (0.7): most queries are single-fact
+# lookups whose best answer IS the cluster of near-identical high-rerank chunks,
+# so diversity must only promote a complementary chunk when its relevance is
+# comparable to the incumbents. At 0.7 the diversity penalty cannot displace a
+# candidate whose normalized relevance lead exceeds 0.3.
+MMR_LAMBDA: float = 0.7
+
+# MMR is gated on redundancy: it only re-orders selection when the pool
+# actually contains near-duplicate high-rerank chunks. A pool is "redundant"
+# when at least two of its top candidates have pairwise cosine similarity above
+# this threshold. Below it the pool is already diverse, so MMR would be a
+# no-op at best and a relevance-displacing risk at worst — the pipeline falls
+# through to plain top-N relevance ranking instead.
+MMR_REDUNDANCY_SIM = 0.85
+
+# Number of top-relevance candidates inspected for the redundancy gate. Keeping
+# this small focuses the gate on the chunks that would otherwise occupy the
+# retained set, not the long tail of the ~FUSED_TOP_N pool.
+MMR_REDUNDANCY_TOP_K = 5
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +852,85 @@ def enforce_per_version_floor(
     return retained + to_add
 
 
+def enforce_per_subtype_floor(
+    retained: list[RetrievedChunk],
+    fused_by_company_subtype: dict[tuple[str, str], list[RetrievedChunk]],
+    intent: str,
+    max_per_subtype: int = SUBTYPE_FLOOR_MAX,
+) -> list[RetrievedChunk]:
+    """Ensure every co-existing doc_subtype of a company reaches retained.
+
+    Only fires for the ``latest`` intent. When a single company has 2+ distinct
+    ``doc_subtype`` values in the fused candidate pool (e.g. an investor-day
+    session and a quarterly deck for the same reporting period), a global rerank
+    top-N can be consumed entirely by whichever subtype phrases the query best,
+    leaving the other subtype with zero coverage even though it carries eligible
+    evidence. For each (company, doc_subtype) present in the fused pool but
+    absent from retained, the highest-rerank-score chunk from that subtype is
+    injected with ``retrieval_stage="subtype_floor"``.
+
+    A company with only one subtype in the fused pool is a no-op: it cannot be
+    starved by a competing subtype, and cross-company coverage is the
+    per-issuer floor's responsibility, not this one's.
+    """
+    if intent != "latest":
+        return retained
+
+    # Companies that genuinely expose 2+ subtypes in the fused pool; a
+    # single-subtype company has nothing to balance against.
+    subtypes_by_company: dict[str, set[str]] = {}
+    for company, subtype in fused_by_company_subtype:
+        subtypes_by_company.setdefault(company, set()).add(subtype)
+    multi_subtype_companies = {
+        company for company, subtypes in subtypes_by_company.items() if len(subtypes) >= 2
+    }
+    if not multi_subtype_companies:
+        return retained
+
+    represented = {(rc.chunk.company, rc.chunk.doc_subtype) for rc in retained}
+    retained_ids = {rc.chunk.id for rc in retained}
+    to_add: list[RetrievedChunk] = []
+
+    for (company, subtype), candidates in fused_by_company_subtype.items():
+        if company not in multi_subtype_companies:
+            continue
+        if (company, subtype) in represented:
+            continue
+        if not candidates:
+            continue
+        scored = sorted(
+            candidates,
+            key=lambda rc: rc.rerank_score if rc.rerank_score is not None else float("-inf"),
+            reverse=True,
+        )
+        added_for_subtype = 0
+        for rc in scored:
+            if added_for_subtype >= max_per_subtype:
+                break
+            if rc.chunk.id in retained_ids:
+                continue
+            rc.retrieval_stage = "subtype_floor"
+            rc.expansion_reason = (
+                f"per-subtype floor: {company} / {subtype} "
+                f"(score={rc.rerank_score})"
+            )
+            to_add.append(rc)
+            retained_ids.add(rc.chunk.id)
+            added_for_subtype += 1
+            logger.info(
+                "  [subtype-floor] added chunk for %s / %s (score=%s)",
+                company, subtype, rc.rerank_score,
+            )
+
+    if to_add:
+        logger.info(
+            "  [subtype-floor] added %d chunk(s) for %d missing subtype(s)",
+            len(to_add), len(to_add),
+        )
+
+    return retained + to_add
+
+
 def _balance_per_version(
     reranked_all: list[RetrievedChunk],
     intent: str,
@@ -863,6 +968,202 @@ def _balance_per_version(
         reverse=True,
     )
     return balanced[:total_budget]
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    """Return cosine similarity between two equal-length embedding vectors.
+
+    Returns 0.0 when either vector has zero magnitude so a degenerate
+    embedding never produces a spurious high-similarity penalty. Implemented
+    without numpy to keep this hot loop dependency-free; the pool is ~40
+    chunks so the pure-Python cost is negligible.
+    """
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return dot / ((norm_a ** 0.5) * (norm_b ** 0.5))
+
+
+def _normalize_relevance(pool: list[RetrievedChunk]) -> dict[UUID, float]:
+    """Min-max-normalize rerank scores across *pool* into ``[0, 1]``.
+
+    The cosine-similarity term in MMR lives in ``[0, 1]``; rerank scores are
+    raw cross-encoder logits on an open scale, so they must be rescaled to be
+    comparable. When all scores are equal (or only one candidate exists) every
+    chunk maps to 1.0 — relevance carries no signal, leaving selection to the
+    diversity term and input order. Chunks with no rerank_score map to 0.0.
+    """
+    scored = [
+        rc.rerank_score for rc in pool if rc.rerank_score is not None
+    ]
+    if not scored:
+        return {rc.chunk.id: 0.0 for rc in pool}
+    lo, hi = min(scored), max(scored)
+    span = hi - lo
+    out: dict[UUID, float] = {}
+    for rc in pool:
+        if rc.rerank_score is None:
+            out[rc.chunk.id] = 0.0
+        elif span <= 0.0:
+            out[rc.chunk.id] = 1.0
+        else:
+            out[rc.chunk.id] = (rc.rerank_score - lo) / span
+    return out
+
+
+def _pool_is_redundant(
+    pool: list[RetrievedChunk],
+    embeddings: dict[str, list[float]],
+    *,
+    top_k: int = MMR_REDUNDANCY_TOP_K,
+    sim_threshold: float = MMR_REDUNDANCY_SIM,
+) -> bool:
+    """Return True when the top-``top_k`` candidates contain near-duplicates.
+
+    The MMR diversity term is only worth applying when the pool actually has
+    redundancy to break up: two or more high-rerank candidates whose pairwise
+    cosine similarity exceeds ``sim_threshold``. A pool that is already diverse
+    falls through to plain relevance ranking, so single-fact queries whose top
+    chunks are the genuinely-best (and non-redundant) answers are untouched.
+    """
+    top = sorted(
+        pool,
+        key=lambda rc: rc.rerank_score if rc.rerank_score is not None else float("-inf"),
+        reverse=True,
+    )[:top_k]
+    vecs = [
+        (rc.chunk.id, embeddings[str(rc.chunk.id)])
+        for rc in top
+        if str(rc.chunk.id) in embeddings
+    ]
+    for i in range(len(vecs)):
+        for j in range(i + 1, len(vecs)):
+            if _cosine_sim(vecs[i][1], vecs[j][1]) >= sim_threshold:
+                return True
+    return False
+
+
+def mmr_select(
+    pool: list[RetrievedChunk],
+    embeddings: dict[str, list[float]],
+    *,
+    budget: int,
+    lambda_: float = MMR_LAMBDA,
+) -> list[RetrievedChunk]:
+    """Select up to *budget* chunks from *pool* by Maximal Marginal Relevance.
+
+    Standard MMR: starting from the single highest-relevance candidate, each
+    subsequent pick maximizes
+    ``lambda_ * rel(c) - (1 - lambda_) * max_sim(c, selected)`` where ``rel`` is
+    the min-max-normalized rerank score and ``sim`` is cosine similarity between
+    candidate embeddings.
+
+    The top-1-by-relevance chunk is always selected first, so the primary-answer
+    chunk for single-fact queries is never displaced; diversity only governs the
+    remaining slots. Candidates missing an embedding incur a 0.0 similarity
+    penalty (treated as maximally novel) so a missing vector never silently
+    suppresses a candidate.
+
+    Returns *pool* truncated to *budget* by relevance when the pool is small
+    enough that no selection is needed.
+    """
+    if not pool:
+        return []
+    if budget <= 0:
+        return []
+    if len(pool) <= budget:
+        return list(pool)
+
+    rel = _normalize_relevance(pool)
+
+    by_relevance = sorted(
+        pool,
+        key=lambda rc: rel[rc.chunk.id],
+        reverse=True,
+    )
+    # Seed with the top-1 by relevance so the primary-answer chunk is locked in.
+    selected: list[RetrievedChunk] = [by_relevance[0]]
+    selected_ids = {by_relevance[0].chunk.id}
+    remaining = by_relevance[1:]
+
+    while remaining and len(selected) < budget:
+        best_rc: RetrievedChunk | None = None
+        best_score = float("-inf")
+        for rc in remaining:
+            cand_emb = embeddings.get(str(rc.chunk.id))
+            if cand_emb is None:
+                max_sim = 0.0
+            else:
+                max_sim = 0.0
+                for sel in selected:
+                    sel_emb = embeddings.get(str(sel.chunk.id))
+                    if sel_emb is None:
+                        continue
+                    sim = _cosine_sim(cand_emb, sel_emb)
+                    if sim > max_sim:
+                        max_sim = sim
+            mmr_score = lambda_ * rel[rc.chunk.id] - (1.0 - lambda_) * max_sim
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_rc = rc
+        if best_rc is None:
+            break
+        selected.append(best_rc)
+        selected_ids.add(best_rc.chunk.id)
+        remaining = [rc for rc in remaining if rc.chunk.id not in selected_ids]
+
+    return selected
+
+
+def _apply_mmr_selection(
+    reranked_pool: list[RetrievedChunk],
+    conn,
+    *,
+    budget: int,
+) -> list[RetrievedChunk]:
+    """Re-select *budget* chunks from the scored rerank pool via gated MMR.
+
+    Hydrates candidate embeddings in one bounded query (the pool is ~FUSED_TOP_N
+    chunks), checks the redundancy gate, and applies :func:`mmr_select` only
+    when the pool contains near-duplicate high-rerank candidates. Otherwise
+    returns the plain relevance-ordered top-``budget`` slice, leaving non-
+    redundant single-fact pools exactly as the reranker ordered them.
+
+    The returned list is re-sorted by rerank_score descending so downstream
+    stages (which assume relevance order for cap/floor decisions) see the
+    strongest evidence first; MMR governs *which* chunks survive, not their
+    presentation order.
+    """
+    if len(reranked_pool) <= budget:
+        return reranked_pool
+
+    ids = [str(rc.chunk.id) for rc in reranked_pool]
+    embeddings = fetch_embeddings_by_ids(ids, conn)
+
+    if not _pool_is_redundant(reranked_pool, embeddings):
+        logger.info("  [mmr] pool not redundant; plain top-%d relevance ranking", budget)
+        return sorted(
+            reranked_pool,
+            key=lambda rc: rc.rerank_score if rc.rerank_score is not None else float("-inf"),
+            reverse=True,
+        )[:budget]
+
+    selected = mmr_select(reranked_pool, embeddings, budget=budget)
+    logger.info(
+        "  [mmr] redundant pool; MMR-selected %d/%d (lambda=%.2f)",
+        len(selected), len(reranked_pool), MMR_LAMBDA,
+    )
+    return sorted(
+        selected,
+        key=lambda rc: rc.rerank_score if rc.rerank_score is not None else float("-inf"),
+        reverse=True,
+    )
 
 
 def _apply_post_rerank_pipeline(
@@ -1070,14 +1371,16 @@ def _retrieve_core(
     logger.info("  Fused candidates: %d", len(fused))
 
     # For comparison/conflict, score the full fused pool so per-version
-    # top-K balancing has all candidates to choose from; for other intents
-    # the existing top-N cutoff is fine. The cross-encoder scores every
-    # candidate in either case, only the slice returned differs.
+    # top-K balancing has all candidates to choose from; other intents score
+    # the full pool too so MMR diversity re-selection can promote a
+    # complementary-facet candidate that the global top-N cutoff would drop.
+    # The cross-encoder scores every candidate in either case.
     if intent in ("comparison", "conflict"):
         reranked_all = rerank(query, fused, top_n=len(fused))
         reranked = _balance_per_version(reranked_all, intent, total_budget=rerank_top_n)
     else:
-        reranked = rerank(query, fused, top_n=rerank_top_n)
+        reranked_all = rerank(query, fused, top_n=len(fused))
+        reranked = _apply_mmr_selection(reranked_all, conn, budget=rerank_top_n)
     logger.info("  Reranked top score: %.3f",
                 reranked[0].rerank_score if reranked else float("-inf"))
 
@@ -1104,6 +1407,18 @@ def _retrieve_core(
     for rc in fused:
         fused_by_version_group.setdefault(version_group_key(rc.chunk), []).append(rc)
     reranked = enforce_per_version_floor(reranked, fused_by_version_group, intent)
+
+    # Per-subtype floor: latest-intent queries can collapse onto whichever of a
+    # company's co-existing subtypes (e.g. quarterly deck vs. investor-day
+    # session) phrases the query best; inject the best chunk from any subtype
+    # starved out of the rerank top-N. Disjoint from the version floor, which
+    # fires only on comparison/conflict.
+    fused_by_company_subtype: dict[tuple[str, str], list[RetrievedChunk]] = {}
+    for rc in fused:
+        fused_by_company_subtype.setdefault(
+            (rc.chunk.company, rc.chunk.doc_subtype), []
+        ).append(rc)
+    reranked = enforce_per_subtype_floor(reranked, fused_by_company_subtype, intent)
 
     top_rerank_score = (
         reranked[0].rerank_score if reranked and reranked[0].rerank_score is not None
@@ -1222,8 +1537,8 @@ def retrieve(
     #     extract_companies returns the named set and companies_filter passes
     #     it to BM25 and vector, constraining the candidate pool. Within that
     #     constrained pool the rerank generally maintains per-issuer
-    #     representation. Promote to per-issuer floor here if probes ever show
-    #     cross-issuer collapse on this branch.
+    #     representation. Promote to a per-issuer floor here if cross-issuer
+    #     collapse is observed on this branch.
     if intent == "all_company_synthesis":
         with connect() as conn:
             synthesis_result = retrieve_all_company_synthesis(

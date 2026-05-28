@@ -34,14 +34,10 @@ _SELECT_COLS = """
     doc_subtype, page_content_class, contextualized_text
 """.strip()
 
-# Cast to ::halfvec explicitly because the column type is halfvec(1024), not
-# vector. psycopg passes list[float] as a plain array; the cast tells pgvector
-# which type adapter to use so the <=> cosine-distance operator resolves to
-# halfvec_cosine_ops (matched by the HNSW index).
-# COALESCE falls back to the base embedding when contextualized_embedding is
-# NULL, so chunks not yet processed by scripts/contextualize.py continue to
-# work correctly.  No boilerplate filter here — vector distance handles those
-# pages via embedding similarity and false-positive filtering would hurt recall.
+# ::halfvec cast picks the halfvec_cosine_ops adapter for <=> so the HNSW
+# index is used (psycopg would otherwise send a plain array).
+# COALESCE falls back to base embedding for chunks not yet contextualized.
+# No boilerplate filter: a false-positive filter here would hurt recall.
 _VECTOR_SQL = f"""
 SELECT {_SELECT_COLS}
 FROM chunks
@@ -79,6 +75,49 @@ WHERE is_parent = FALSE
 ORDER BY COALESCE(contextualized_embedding, embedding) <=> %s::halfvec
 LIMIT %s;
 """
+
+
+def fetch_embeddings_by_ids(
+    ids: list[str],
+    conn: psycopg.Connection,
+) -> dict[str, list[float]]:
+    """Return ``{chunk_id: embedding}`` for the requested chunk ids.
+
+    Retrieval rows strip the embedding columns for leanness (see
+    ``_SELECT_COLS``), so any post-rerank stage that needs vector similarity
+    must hydrate the embeddings in a separate bounded query. Uses
+    ``COALESCE(contextualized_embedding, embedding)`` so the vector matches the
+    one indexed for search, falling back to the base embedding when the
+    contextualized column is unpopulated.
+
+    Args:
+        ids: Chunk ids (as strings) to hydrate. Empty list returns ``{}``.
+        conn: Open psycopg connection with pgvector types registered.
+
+    Returns:
+        Mapping from chunk id (string) to its 1024-dim embedding as a list of
+        floats. Ids without a stored embedding are omitted from the mapping.
+    """
+    if not ids:
+        return {}
+    sql = """
+        SELECT id, COALESCE(contextualized_embedding, embedding) AS emb
+        FROM chunks
+        WHERE id = ANY(%s)
+    """
+    out: dict[str, list[float]] = {}
+    with conn.cursor() as cur:
+        cur.execute(sql, [ids])
+        for row in cur.fetchall():
+            chunk_id, emb = row[0], row[1]
+            if emb is None:
+                continue
+            # pgvector returns halfvec as a HalfVector object, not a plain
+            # iterable; .to_list() yields the float components.
+            if hasattr(emb, "to_list"):
+                emb = emb.to_list()
+            out[str(chunk_id)] = [float(x) for x in emb]
+    return out
 
 
 def vector_search(

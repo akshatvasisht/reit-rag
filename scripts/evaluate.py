@@ -731,8 +731,9 @@ def render_markdown(
         baseline_mrr = _compute_mrr_at_k(baseline_rows)
         lines.append("| Reranker | Recall@5 | MRR@3 |")
         lines.append("|---|---|---|")
+        from src.retrieval.reranker import _MODEL_NAME as _baseline_model
         lines.append(
-            f"| cross-encoder/ms-marco-MiniLM-L-6-v2 (baseline) "
+            f"| {_baseline_model} (baseline) "
             f"| {baseline_recall:.3f} | {baseline_mrr:.3f} |"
         )
         if alt_error is not None:

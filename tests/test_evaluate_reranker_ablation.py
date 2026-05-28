@@ -213,7 +213,8 @@ def test_render_markdown_tier3b_present(monkeypatch) -> None:
     assert "Tier 3b" in md
     assert "Reranker ablation" in md
     assert "reranker_alternative" in md
-    assert "cross-encoder/ms-marco-MiniLM-L-6-v2 (baseline)" in md
+    from src.retrieval.reranker import _MODEL_NAME
+    assert f"{_MODEL_NAME} (baseline)" in md
 
 
 def test_render_markdown_tier3b_absent_by_default() -> None:

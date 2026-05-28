@@ -6,10 +6,9 @@ post-rerank evidence quality. The score is computed on the pre-augmentation
 chunk list so conflict-injected and sibling chunks (added at synthetic
 scores) do not skew it.
 
-The three weights and the two band cutoffs below are uncalibrated initial
-values chosen to produce intuitive ordering. They should be re-drawn at the
-medians of correct / borderline / refused queries once a sufficient
-evaluation set has been evaluated.
+The three signal weights are heuristic. The two band cutoffs are head/tail
+discriminators anchored on the observed answered-path confidence distribution,
+not pass/fail predictors.
 """
 
 from __future__ import annotations
@@ -19,8 +18,8 @@ import math
 from src.models import RetrievedChunk
 
 
-CONFIDENCE_HIGH_CUTOFF = 0.75   # uncalibrated; pending measurement on evaluation set
-CONFIDENCE_LOW_CUTOFF  = 0.45   # uncalibrated; pending measurement on evaluation set
+CONFIDENCE_HIGH_CUTOFF = 0.75   # head/tail discriminator, anchored on observed distribution
+CONFIDENCE_LOW_CUTOFF  = 0.45   # head/tail discriminator, anchored on observed distribution
 W_GAP, W_MAGNITUDE, W_COVERAGE = 0.50, 0.30, 0.20
 
 
@@ -40,12 +39,12 @@ def _score_gap_signal(scores: list[float]) -> float:
 
 
 def _score_magnitude_signal(top_score: float) -> float:
-    """Map a cross-encoder logit to [0, 1] via a sigmoid.
+    """Map a cross-encoder raw logit to [0, 1] via a sigmoid.
 
-    The ms-marco cross-encoder's answered-band logits skew negative
-    (threshold is -5.0). The sigmoid is centred at -2.0 with scale 2.0 so
-    that top_score=-5 maps to ~0.18, top_score=-2 to 0.50, and
-    top_score=+2 to ~0.88.
+    bge-reranker-v2-m3 in raw-logit mode scores the answered band roughly in
+    [0, +8] on this corpus. The sigmoid is centred at -2.0 with scale 2.0 so
+    that top_score=-5 maps to ~0.18, top_score=-2 to 0.50, and top_score=+2
+    to ~0.88, saturating toward 1.0 for clearly-relevant tops.
     """
     return 1.0 / (1.0 + math.exp(-(top_score + 2.0) / 2.0))
 

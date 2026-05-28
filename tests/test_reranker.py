@@ -46,14 +46,7 @@ def _make_rc(chunk: Chunk) -> RetrievedChunk:
 
 
 def test_contextualized_text_preferred_over_raw_chunk_text(monkeypatch) -> None:
-    """Chunk with 'pipeline' in contextualized_text must outscore bare-Program chunk.
-
-    This is a regression guard for the EGP p.26 case where the cross-encoder
-    scored (query='pipeline', passage='Current Development and Value-Add Program...')
-    at -4.9 and pushed the correct chunk past top-5.  The fix: feed
-    contextualized_text (which contains 'pipeline') to the cross-encoder instead
-    of raw chunk_text.
-    """
+    """A chunk whose contextualized_text contains 'pipeline' must outscore one with only the raw non-matching 'Program' text."""
     from src.retrieval import reranker as _reranker_module
 
     # Chunk A: contextualized_text bridges the vocab gap.
@@ -74,7 +67,7 @@ def test_contextualized_text_preferred_over_raw_chunk_text(monkeypatch) -> None:
     captured_pairs: list[list[tuple[str, str]]] = []
 
     class _FakeEncoder:
-        def predict(self, pairs: Any) -> list[float]:
+        def predict(self, pairs: Any, **kwargs: Any) -> list[float]:
             captured_pairs.append(list(pairs))
             # Score by whether the passage contains "pipeline".
             return [5.0 if "pipeline" in p.lower() else -4.9 for _, p in pairs]
@@ -113,7 +106,7 @@ def test_rerank_fallback_when_no_contextualized_text(monkeypatch) -> None:
     captured: list[list[tuple[str, str]]] = []
 
     class _FakeEncoder:
-        def predict(self, pairs: Any) -> list[float]:
+        def predict(self, pairs: Any, **kwargs: Any) -> list[float]:
             captured.append(list(pairs))
             return [1.0] * len(pairs)
 
