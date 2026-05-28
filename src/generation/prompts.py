@@ -102,27 +102,38 @@ the company is absent from the corpus unless you have explicit knowledge of
 the corpus composition. Conflating retrieval miss with corpus absence
 misleads the user into believing the corpus is smaller than it actually is.
 Example (correct framing):
-"The retrieved chunks do not include data from Realty Income for this metric. Other
+"The retrieved chunks do not include data from [Company] for this metric. Other
 in-corpus companies surfaced this figure: ..."
 Example (incorrect framing — DO NOT do this):
-"Realty Income is not in the indexed corpus."
+"[Company] is not in the indexed corpus."
 
 
 Distinguish reported figures from forward-looking guidance: label guidance as "Management guided..." not as fact.
 When a query depends on data found only in a chart that was not text-extractable, say so explicitly and cite the page rather than guessing numbers.
 
 Example (factual + guidance):
-"Digital Realty reported net debt to EBITDA of 4.9x as of December 31, 2025 [Digital Realty, Investor Presentation, March 2026, p.34]. Management guided FY2026 FFO between $7.10 and $7.30 per share [Digital Realty, Investor Presentation, March 2026, p.14]."
+"Acme REIT reported net debt to EBITDA of 5.2x as of year-end [Acme REIT, Investor Presentation, March 2026, p.31]. Management guided FY2026 FFO between $6.40 and $6.60 per share [Acme REIT, Investor Presentation, March 2026, p.12]."
 
 Example (conflict handling):
-"The December deck reports leverage of 5.1x [Digital Realty, Investor Presentation, December 2025, p.14], while the March deck reports 4.9x [Digital Realty, Investor Presentation, March 2026, p.34]. These values differ across versions."
+"The December deck reports leverage of 5.3x [Acme REIT, Investor Presentation, December 2025, p.12], while the March deck reports 5.0x [Acme REIT, Investor Presentation, March 2026, p.30]. These values differ across versions."
 
 Example (refusal):
 "I couldn't find reliable information on this in the provided documents.
-Documents searched: Digital Realty (Investor Presentation, March 2026); Digital Realty (Investor Presentation, December 2025)."
+Documents searched: Acme REIT (Investor Presentation, March 2026); Acme REIT (Investor Presentation, December 2025)."
 
 Example (subtype disambiguation — when two retrieved chunks share company + doc_type + month):
-"BXP's December Investor Day session reports same-store occupancy of 86.4% [BXP, Investor Presentation (Investor Day Session), December 2025, p.79]; the Quarterly Investor Deck for the same month reports 87.1% [BXP, Investor Presentation (Quarterly Investor Deck), December 2025, p.43]. The two figures reflect different as-of dates within the period."
+"Acme REIT's December Investor Day Session reports same-store occupancy of 88.2% [Acme REIT, Investor Presentation (Investor Day Session), December 2025, p.40]; the Quarterly Investor Deck for the same month reports 88.9% [Acme REIT, Investor Presentation (Quarterly Investor Deck), December 2025, p.22]. The two figures reflect different as-of dates within the period."
+
+INTRA-DOCUMENT DIVERGENCE — MANDATORY:
+The same metric for the same entity can appear at different values WITHIN a single document. Do NOT collapse to one number or rationalize the gap unless the evidence justifies it.
+1. Same metric + same entity + same or overlapping as-of date but different value: treat as an intra-document inconsistency. Surface EACH value with its page and as-of qualifier. Do NOT assume the gap is temporal change (growth/decline) unless the as-of dates genuinely differ in the excerpts.
+2. Same metric/attribute reported at different scope qualifiers (e.g. total footprint vs a narrower geographic or segment scope): surface ALL scopes explicitly with their qualifiers. Do NOT pick the larger figure and drop the narrower-scope one.
+
+Example (intra-document inconsistency — same as-of date):
+"A deck reports 4,200+ customers on p.3 and 3,800+ customers on p.20 [Acme REIT, Investor Presentation, March 2026], both footnoted as of the same year-end date. The two figures share the same as-of date, so this is an internal inconsistency rather than period-over-period change — verify against the source."
+
+Example (scope qualifiers — surface every scope):
+"Acme REIT reports operating in 14 countries (total footprint) on pp.5–6 [Acme REIT, Investor Presentation, ...], and 11 countries when scoped to a single region on pp.15/31 [Acme REIT, Investor Presentation, ...]. The difference reflects scope (total vs region-only), not a discrepancy."
 
 CRITICAL — when the excerpt's citation attribute contains a parenthetical subtype (e.g. `Investor Presentation (Quarterly Investor Deck)`), you MUST preserve the full string verbatim — both the doc-type name AND the parenthetical subtype. Do not abbreviate to just the subtype, even in dense tabular output where space is at a premium. The parser uses the full form to verify the citation against the retrieved chunk.
 
@@ -142,10 +153,12 @@ asks "what does source X say about Y" and the chunk shows Y attributed to a
 different footnote source than X, do NOT substitute — state explicitly that the
 deck attributes Y to the actual footnote source, and that X is the source for a
 different adjacent claim.
-Example: if $478 is anchored to fn.3 = "Simon analysis" and fn.2 = "ICSC report"
-covers only the preceding sentence, you MUST NOT attribute $478 to ICSC even if
-the query asks what ICSC says — instead say: "The deck attributes $478 to Simon
-analysis (fn.3); the ICSC citation (fn.2) covers a different adjacent claim."
+Example: if a per-square-foot figure is anchored to fn.3 = "company analysis"
+while fn.2 = "an industry source" covers only the preceding sentence, you MUST
+NOT attribute the figure to the industry source even if the query asks what that
+source says — instead say: "The deck attributes the figure to the company's own
+analysis (fn.3); the industry-source citation (fn.2) covers a different adjacent
+claim."
 
 CITATION PAGE ANCHORING — MANDATORY:
 Every page number you cite (the p.N segment of an inline citation) MUST be the
@@ -160,6 +173,33 @@ not have evidence — soft-refuse for that figure ("the retrieved chunks for
 [Company] do not surface this metric") and list the pages you did retrieve.
 This rule is especially important on cross-company synthesis queries where it
 is tempting to invent a page tuple for every row in a ranking table.
+
+PEER-SET COMPLETENESS — MANDATORY:
+When the answer is a comparison drawn from a chart, ranking, or peer table,
+include EVERY entity present in the source — do not drop a competitor because it
+ranks low or appears in only one panel of a multi-panel figure. When the peer
+set differs across metrics (a company shown for one metric but absent for
+another), say so explicitly rather than presenting a varying set as if it were
+uniform.
+Example:
+"A peer chart that plots five operators must be summarized with all five named,
+including the lowest-ranked operator; do not report only the top four. If an
+adjacent panel plots a different set of operators, scope that metric to the
+operators it actually shows and note the difference."
+
+CROSS-DOCUMENT COMPLEMENTARITY — MANDATORY:
+When retrieved evidence for the SAME company spans multiple documents or deck
+subtypes (e.g. an Investor Day Session and a Quarterly Investor Deck), draw on
+the complementary figures from EACH rather than answering from only one —
+attribute each figure to its own deck. Two subtypes reporting related but
+distinct metrics are not in conflict: report both with their own citations
+instead of using only the source that happened to rank first in retrieval.
+Example:
+"A company's positioning can draw on both decks: the Investor Day Session reports
+one metric [Acme REIT, Investor Presentation (Investor Day Session), December 2025,
+p.N], while the Quarterly Investor Deck reports a complementary figure [Acme REIT,
+Investor Presentation (Quarterly Investor Deck), December 2025, p.M]. The two are
+complementary, not conflicting."
 
 Use the submit_answer tool to return your response. Populate all fields:
 - answer_prose: Write the full answer as readable prose. Assemble it from your claims.
@@ -210,9 +250,8 @@ def format_citation_header(chunk_or_meta, *, disambiguate: bool = False) -> str:
     When ``disambiguate=True`` and the chunk has a non-empty ``doc_subtype``,
     emits the extended form ``[Company, Doc Type (Subtype), Month Year, p.N]``
     so two decks with the same (company, doc_type, report_date) remain
-    distinguishable in the answer text. Anchor case: BXP Investor Day Session
-    vs Quarterly Investor Deck, both December 2025; PSA Company Update vs
-    Merger Presentation, both March 2026.
+    distinguishable in the answer text (e.g. two same-month decks of different
+    subtypes for one company).
 
     Accepts either a `Chunk` or any object with company / doc_type /
     report_date / page_number / doc_subtype attributes.
@@ -336,27 +375,6 @@ def build_user_message(
 ABSTENTION_TEMPLATE = (
     "I couldn't find reliable information on this in the provided documents.\n\n"
     "Documents searched: {docs}"
-)
-
-
-# Instruction embedded unconditionally in the base system prompt to prevent
-# footnote-attribution substitution when multiple footnote anchors appear in the
-# same retrieved chunk (anchor case: Simon p.4 — $478 / fn.3 = "Simon analysis"
-# adjacent to fn.2 = "ICSC" covering a different claim).
-_FOOTNOTE_ANCHOR_INSTRUCTION = (
-    "FOOTNOTE ANCHOR DISAMBIGUATION — MANDATORY:\n"
-    "When a retrieved chunk contains multiple footnote anchors near a numeric claim\n"
-    "(superscript digits, \"(fn N)\" markers, or sentences ending in ², ³, ⁴, etc.),\n"
-    "the source attribution in your citation MUST match the footnote anchor attached\n"
-    "to that specific numeric value, not an adjacent footnote's anchor. If a user\n"
-    "asks \"what does source X say about Y\" and the chunk shows Y attributed to a\n"
-    "different footnote source than X, do NOT substitute — state explicitly that the\n"
-    "deck attributes Y to the actual footnote source, and that X is the source for a\n"
-    "different adjacent claim.\n"
-    "Example: if $478 is anchored to fn.3 = \"Simon analysis\" and fn.2 = \"ICSC report\"\n"
-    "covers only the preceding sentence, you MUST NOT attribute $478 to ICSC even if\n"
-    "the query asks what ICSC says — instead say: \"The deck attributes $478 to Simon\n"
-    "analysis (fn.3); the ICSC citation (fn.2) covers a different adjacent claim.\""
 )
 
 

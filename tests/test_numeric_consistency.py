@@ -299,7 +299,7 @@ def test_composite_geographic_percentages_match() -> None:
 
 
 def test_chk2_spelled_out_billion_matches_B_suffix() -> None:
-    """'$10.5 billion' must match chunk '$10.5' (PSA merger psa-merg-basic-1)."""
+    """'$10.5 billion' must match chunk '$10.5'."""
     chunk = _make_chunk(chunk_text="NSA enterprise value: $10.5 ($ billions).")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("NSA EV was $10.5 billion.", value="$10.5 billion")
@@ -308,7 +308,7 @@ def test_chk2_spelled_out_billion_matches_B_suffix() -> None:
 
 
 def test_chk2_spelled_out_billion_matches_B_tagged_chunk() -> None:
-    """'$6.2 billion' claim matches chunk '$6.2B' (Realty Income o-adv-6)."""
+    """'$6.2 billion' claim matches chunk '$6.2B'."""
     chunk = _make_chunk(chunk_text="Annual investment volume approximately $6.2B.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("Investment volume was $6.2 billion.", value="$6.2 billion")
@@ -322,7 +322,7 @@ def test_chk2_spelled_out_billion_matches_B_tagged_chunk() -> None:
 
 
 def test_chk3_negative_claim_matches_positive_chunk() -> None:
-    """'-3.6%' claim matches chunk '3.6%' (sign stripped in chart; psa-cu-adv-5)."""
+    """'-3.6%' claim matches chunk '3.6%' (sign stripped in chart)."""
     chunk = _make_chunk(
         chunk_text="NSA same-store NOI growth: 3.6% (negative bar chart)."
     )
@@ -333,7 +333,7 @@ def test_chk3_negative_claim_matches_positive_chunk() -> None:
 
 
 def test_chk3_parenthetical_negative_matches_positive_chunk() -> None:
-    """'($22.3M)' claim (accounting-negative) matches chunk '$22.3' (bxp-morn-adv-7)."""
+    """'($22.3M)' claim (accounting-negative) matches chunk '$22.3'."""
     chunk = _make_chunk(chunk_text="JV losses: $22.3 million write-down.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("JV net loss was ($22.3M).", value="($22.3M)")
@@ -347,7 +347,7 @@ def test_chk3_parenthetical_negative_matches_positive_chunk() -> None:
 
 
 def test_chk4_years_unit_uses_substring_check() -> None:
-    """'39.6 years' does not fire mismatch when present in chunk text (VICI xdoc-adv-5)."""
+    """'39.6 years' does not fire a mismatch when present in chunk text."""
     chunk = _make_chunk(
         chunk_text="Portfolio WALT: 39.6 years (inclusive of all renewal options)."
     )
@@ -358,7 +358,7 @@ def test_chk4_years_unit_uses_substring_check() -> None:
 
 
 def test_chk4_kw_unit_uses_substring_check() -> None:
-    """'27 kW per rack in 2025' — non-financial unit, substring check (dlr-adv-8)."""
+    """'27 kW per rack in 2025' — non-financial unit, substring check."""
     chunk = _make_chunk(
         chunk_text="Rack density rising: from 7 kW in 2021 to 27 kW per rack in 2025."
     )
@@ -369,7 +369,7 @@ def test_chk4_kw_unit_uses_substring_check() -> None:
 
 
 def test_chk4_sqft_unit_uses_substring_check() -> None:
-    """'65 million square feet' — non-financial unit, substring check (egp-basic-1)."""
+    """'65 million square feet' — non-financial unit, substring check."""
     chunk = _make_chunk(
         chunk_text="65 Million Square Feet Under Ownership by EastGroup Properties."
     )
@@ -380,7 +380,7 @@ def test_chk4_sqft_unit_uses_substring_check() -> None:
 
 
 def test_chk4_date_value_skipped() -> None:
-    """'January 27, 2026' as claim value — date string, no numeric mismatch (xdoc-std-6)."""
+    """'January 27, 2026' as claim value — date string, no numeric mismatch."""
     chunk = _make_chunk(chunk_text="Board declared dividend payable January 27, 2026.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("Payment date is January 27, 2026.", value="January 27, 2026")
@@ -403,7 +403,7 @@ def test_chk5_trailing_annotation_stripped() -> None:
 
 
 def test_chk5_proper_noun_claim_skipped() -> None:
-    """'Norges' as claim value — non-numeric proper noun, no mismatch (bxp-morn-adv-3)."""
+    """'Norges' as claim value — non-numeric proper noun, no mismatch."""
     chunk = _make_chunk(chunk_text="Norges Bank Investment Management holds 45% interest.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("The JV partner is Norges.", value="Norges")
@@ -417,7 +417,7 @@ def test_chk5_proper_noun_claim_skipped() -> None:
 
 
 def test_chk6_mm_suffix_matches_m_in_chunk() -> None:
-    """'$1,246.2MM' claim matches chunk '$1,246.2M' (vici-adv-3 / xdoc-adv-7)."""
+    """'$1,246.2MM' claim matches chunk '$1,246.2M'."""
     chunk = _make_chunk(chunk_text="Caesars total annualized cash rent: $1,246.2M.")
     contexts = [_make_rc(chunk)]
     claim = _make_claim("Caesars rent is $1,246.2MM.", value="$1,246.2MM")
@@ -426,7 +426,7 @@ def test_chk6_mm_suffix_matches_m_in_chunk() -> None:
 
 
 def test_chk6_mm_composite_with_percent() -> None:
-    """'$1,246.2MM (39%)' — MM suffix + parenthetical composite (vici-basic-1)."""
+    """'$1,246.2MM (39%)' — MM suffix + parenthetical composite."""
     chunk = _make_chunk(
         chunk_text="Caesars: $1,246.2M annualized cash rent (39% of total)."
     )
@@ -442,7 +442,7 @@ def test_chk6_mm_composite_with_percent() -> None:
 
 
 def test_chk7_greater_than_prefix_stripped() -> None:
-    """'>$15B' claim matches chunk '$15B' (dlr-adv-7 NNM-1 dlr liquidity)."""
+    """'>$15B' claim matches chunk '$15B'."""
     chunk = _make_chunk(
         chunk_text="DLR has more than $15B in JV and fund capital available."
     )
@@ -458,7 +458,7 @@ def test_chk7_greater_than_prefix_stripped() -> None:
 
 
 def test_chk8_dollar_thousands_annotation_stripped() -> None:
-    """'$28,183 thousand' — strip thousand annotation and check bare integer (xdoc-std-5)."""
+    """'$28,183 thousand' — strip thousand annotation and check bare integer."""
     chunk = _make_chunk(
         chunk_text="$ in thousands\nRental revenues\t28,183\t51,665"
     )
@@ -785,3 +785,28 @@ def test_bare_decimal_in_table_matches_comma_formatted_large_dollar() -> None:
     assert issues == [], (
         f"Dollar-table rescue should pass comma-formatted $18,402,135; got: {issues}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Non-financial-unit values with approximation markers / trailing prose
+# ---------------------------------------------------------------------------
+
+
+def test_non_financial_unit_with_approx_and_prose_matches() -> None:
+    """'~2.9 GW in-place' must match a chunk stating 'approximately 2.9 GW' —
+    the approximation marker and trailing prose must not block the match."""
+    chunk = _make_chunk(chunk_text="Total in-place IT capacity: approximately 2.9 GW.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("DLR in-place capacity is ~2.9 GW.", value="~2.9 GW in-place")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert issues == [], f"GW-with-prose value should match; got: {issues}"
+
+
+def test_non_financial_unit_value_absent_still_mismatches() -> None:
+    """An absent GW value must still flag — the number+unit fallback must not
+    blanket-pass when the figure is genuinely not in the chunk."""
+    chunk = _make_chunk(chunk_text="Total in-place IT capacity: approximately 2.9 GW.")
+    contexts = [_make_rc(chunk)]
+    claim = _make_claim("DLR future capacity is ~5.0 GW.", value="~5.0 GW future")
+    issues = check_numeric_consistency(_make_answer([claim]), contexts)
+    assert len(issues) == 1, f"absent 5.0 GW value must still mismatch; got: {issues}"

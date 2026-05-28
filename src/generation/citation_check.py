@@ -375,7 +375,7 @@ def _is_non_numeric_proper_noun(value: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Composite value splitting (2a)
+# Composite value splitting
 # ---------------------------------------------------------------------------
 
 # Splits a composite claim value like "86.4% (Q2 2025), ~86.9% (Q4 2025)"
@@ -627,6 +627,19 @@ def _atom_found_in_chunk(
         stripped = re.sub(r"\s*thousand\s*", "", atom, flags=re.IGNORECASE).strip()
         if stripped and stripped.lower() in chunk_text.lower():
             return True
+        # Approximation markers and trailing prose ("~2.9 GW in-place") leave the
+        # whole-string checks above unable to match a chunk that states the value
+        # plainly ("approximately 2.9 GW"). Isolate the numeric token and require
+        # BOTH it (with digit boundaries) and a unit token from the atom to be
+        # present, so the number isn't matched in an unrelated context.
+        num_match = re.search(r"\d+(?:,\d{3})*(?:\.\d+)?", atom)
+        unit_match = _NON_FINANCIAL_UNIT_RE.search(atom)
+        if num_match and unit_match:
+            num = num_match.group(0)
+            unit = unit_match.group(0)
+            num_present = re.search(rf"(?<![\d.]){re.escape(num)}(?![\d.])", chunk_text)
+            if num_present and unit.lower() in chunk_text.lower():
+                return True
         return False
 
     # Proper nouns and other non-numeric values have nothing to verify.

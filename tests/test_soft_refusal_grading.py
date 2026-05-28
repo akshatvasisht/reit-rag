@@ -107,7 +107,7 @@ def test_soft_refusal_pass_on_refusal_language(phrase: str):
 def test_soft_refusal_pass_on_lead_then_adjacent_context():
     """An answer that LEADS with refusal-shaped language and then provides
     adjacent context about what IS disclosed is a textbook soft refusal.
-    This is the g23-style case the prior over-strict grader rejected."""
+    This is the case the prior over-strict grader rejected."""
     gq = _query_with_soft_refusal()
     long_context = (
         "For reference, the deck does disclose leverage ratios, debt service "
@@ -134,7 +134,7 @@ def test_soft_refusal_pass_when_refusal_in_third_sentence():
     [asked-for thing is not in deck] → [bridge sentence with actual reported
     number] → [explanation of why the asked-for thing was not reaffirmed].
     The refusal language often lands in sentence 3, not 1 or 2. The grader
-    must accept this — anchored on the g27 BXP-2025-FFO-guidance answer."""
+    must accept this — the BXP 2025 FFO-guidance answer."""
     gq = _query_with_soft_refusal()
     answer_text = (
         "The retrieved documents surface guidance for full year 2026, not 2025. "

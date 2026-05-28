@@ -1,7 +1,5 @@
 """Tests for the forward-looking integrity guard and corpus-membership framing.
 
-probe_id: bxp-morn-adv-2 (2d anchor), xdoc-std-5/xdoc-adv-6/xdoc-std-4 (2k anchors).
-
 Test design:
 - All tests mock retrieve() and _generate_structured() so no DB or API access.
 - Forward-looking guard tests verify the system prompt injected into _generate_structured
@@ -229,12 +227,12 @@ def test_chunks_support_forecast_language_present() -> None:
 def test_chunks_no_forward_looking_language_returns_false() -> None:
     """Chunk with only reported actuals, no guidance language — must return False.
 
-    This is the anchor failure from bxp-morn-adv-2: the deck's p46 chunk contains
+    The deck's p46 chunk contains
     '$7.10' as an actual but carries NO guidance/target/expect/project/forecast
     language. The guard must fire.
     """
     from src.generation.generator import _chunks_have_forward_looking_support
-    # bxp-morn-adv-2 anchor: reported actual, no forward-looking language
+    # Reported actual, no forward-looking language
     chunks = [_make_chunk(text="BXP reported FFO of $7.10 per share for full-year 2025.")]
     assert _chunks_have_forward_looking_support(chunks) is False
 
@@ -253,7 +251,7 @@ def test_chunks_empty_returns_false() -> None:
 def test_system_prompt_gets_fl_injection_when_query_is_guidance_and_chunks_lack_support(
     monkeypatch,
 ) -> None:
-    """Anchor case (bxp-morn-adv-2): query='BXP 2025 FFO guidance', chunks contain
+    """Query='BXP 2025 FFO guidance', chunks contain
     only reported actuals. The system prompt passed to the LLM must contain the
     forward-looking-absent instruction.
     """
@@ -420,8 +418,7 @@ def test_system_prompt_contains_corpus_companies() -> None:
     """build_system_prompt_with_corpus() must embed all canonical corpus companies
     so the LLM can distinguish retrieval-miss from corpus-absence.
 
-    Anchor probes: xdoc-std-5, xdoc-adv-6, xdoc-std-4 — all three had the LLM
-    assert 'not in corpus' for RI/PSA which ARE in corpus.
+    The LLM previously asserted 'not in corpus' for RI/PSA which ARE in corpus.
     """
     from src.generation.generator import _build_system_prompt_with_corpus
     from src.corpus_registry import CORPUS_REGISTRY_SEED
@@ -452,7 +449,7 @@ def test_answer_uses_corpus_aware_prompt_for_generation(monkeypatch) -> None:
     """When answer() calls _generate_structured, the system_prompt_override passed
     must include the corpus company list.
 
-    Anchor: xdoc-adv-6 — RI was in companies_filter but LLM said 'RI not in corpus'.
+    RI was in companies_filter but the LLM said 'RI not in corpus'.
     We verify the system prompt injected by answer() into _generate_structured
     includes all corpus companies.
     """
@@ -492,7 +489,7 @@ def test_answer_uses_corpus_aware_prompt_for_generation(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# simon-std-1 — Footnote anchor disambiguation in system prompt
+# Footnote anchor disambiguation in system prompt
 # ---------------------------------------------------------------------------
 
 
@@ -501,7 +498,7 @@ def test_system_prompt_contains_footnote_anchor_instruction() -> None:
     instruction so the Simon p.4 $478/fn.3 vs ICSC/fn.2 trap is caught at generation
     time regardless of query intent.
 
-    Anchor probe: simon-std-1 — user asks "what does ICSC say about $478 per sq ft"
+    A user asks "what does ICSC say about $478 per sq ft"
     but the chunk attributes $478 to fn.3 (Simon analysis), not fn.2 (ICSC).
     The instruction must be present unconditionally (not gated on FL intent).
     """
@@ -522,7 +519,7 @@ def test_system_prompt_contains_citation_page_anchoring_instruction() -> None:
     where the model has the right value but invents a plausible-looking page
     number that does not match any retrieved chunk.
 
-    Anchor probe: g07 — "Rank all companies by Net Debt to EBITDA" produced an
+    "Rank all companies by Net Debt to EBITDA" produced an
     answer whose citation page tuples did not exist in any retrieved chunk.
     """
     from src.generation.generator import _build_system_prompt_with_corpus
@@ -548,7 +545,7 @@ def test_system_prompt_contains_disambiguated_citation_example() -> None:
     preserves the full doc-type+subtype string instead of collapsing to just
     the subtype on synthesis-table output.
 
-    Anchor probe: xdoc-adv-7 — the model produced [VICI Properties, Company Update,
+    The model produced [VICI Properties, Company Update,
     March 2026, p.7] (collapsed) instead of [VICI Properties, Investor Presentation
     (Company Update), March 2026, p.7] (full disambiguated form).
     """
@@ -581,7 +578,7 @@ def test_system_prompt_in_corpus_company_not_found_framing(monkeypatch) -> None:
     """
     from src.generation.generator import _build_system_prompt_with_corpus
 
-    # Simulate the scenario from xdoc-adv-6: RI is in corpus but not retrieved
+    # Simulate the scenario where RI is in corpus but not retrieved
     corpus_companies = ["Realty Income", "BXP", "Digital Realty"]
     prompt = _build_system_prompt_with_corpus(corpus_companies)
 
