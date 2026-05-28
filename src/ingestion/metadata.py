@@ -8,22 +8,19 @@ heuristics, and an LLM-backed subtype classifier.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
+import time
 from pathlib import PurePath
 from typing import Any, Optional
 
+from src.ingestion.json_response import extract_json_object
 from src.models import ContentType, DocumentMeta
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Corpus registry — re-exported for backward compatibility.
-# The authoritative list lives in src.corpus_registry; the seed bootstrap is
-# in src.corpus_registry.
-# ---------------------------------------------------------------------------
+# Re-exported from src.corpus_registry for backward compatibility.
 from src.corpus_registry import CORPUS_REGISTRY  # noqa: E402
 
 
@@ -199,9 +196,15 @@ Document details:
   {first_page_text}
   ---
 
-Return a JSON object with:
+Return ONLY a JSON object (no markdown fences, no commentary) with:
   "doc_subtype": one of the values above
   "confidence": float in [0.0, 1.0]"""
+
+# See page_classifier for the rationale: ride out burst rate-limiting via the
+# SDK's retries, and retry empty/non-JSON bodies at the application level.
+_SUBTYPE_CLIENT_MAX_RETRIES = 6
+_SUBTYPE_PARSE_ATTEMPTS = 3
+_SUBTYPE_PARSE_BACKOFF_S = 0.5
 
 _subtype_client: Optional[Any] = None
 
@@ -214,7 +217,9 @@ def _get_subtype_client() -> Any:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not set")
-        _subtype_client = Anthropic(api_key=api_key)
+        _subtype_client = Anthropic(
+            api_key=api_key, max_retries=_SUBTYPE_CLIENT_MAX_RETRIES
+        )
     return _subtype_client
 
 
@@ -247,31 +252,43 @@ def classify_doc_subtype(
         first_page_text=truncated,
     )
 
-    try:
-        client = _get_subtype_client()
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=100,
-            temperature=0.0,
-            top_k=1,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = "".join(
-            block.text
-            for block in response.content
-            if getattr(block, "type", None) == "text"
-        ).strip()
-        result = json.loads(text)
-        subtype = result.get("doc_subtype", "unknown")
-        confidence = float(result.get("confidence", 0.0))
+    last_err: Optional[Exception] = None
+    for attempt in range(_SUBTYPE_PARSE_ATTEMPTS):
+        try:
+            client = _get_subtype_client()
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=256,
+                temperature=0.0,
+                top_k=1,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(
+                block.text
+                for block in response.content
+                if getattr(block, "type", None) == "text"
+            ).strip()
+            if not text:
+                raise ValueError("empty subtype response")
+            result = extract_json_object(text)
+            subtype = result.get("doc_subtype", "unknown")
+            confidence = float(result.get("confidence", 0.0))
 
-        if confidence < _SUBTYPE_CONFIDENCE_THRESHOLD or subtype not in _VALID_SUBTYPES:
-            return "unknown"
-        return subtype
+            if confidence < _SUBTYPE_CONFIDENCE_THRESHOLD or subtype not in _VALID_SUBTYPES:
+                return "unknown"
+            return subtype
 
-    except Exception:  # noqa: BLE001
-        logger.debug("classify_doc_subtype failed for %s; returning 'unknown'", filename)
-        return "unknown"
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            if attempt < _SUBTYPE_PARSE_ATTEMPTS - 1:
+                time.sleep(_SUBTYPE_PARSE_BACKOFF_S * (2 ** attempt))
+
+    logger.debug(
+        "classify_doc_subtype failed for %s after retries; returning 'unknown' (%s)",
+        filename,
+        last_err,
+    )
+    return "unknown"
 
 
 # Precompiled marker pattern for classify_content_type

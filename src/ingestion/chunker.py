@@ -33,6 +33,18 @@ PARENT_MAX_TOKENS: int = 1024
 CHILD_TARGET_TOKENS: int = 256
 CHILD_MAX_TOKENS: int = 320
 
+# Minimum character length for a standalone child chunk. A bulleted slide
+# (e.g. a "Strengths / Action Plan" summary) parses into one short ListItem
+# block per bullet; emitted individually these become unrankable 11–83 char
+# fragments that pollute keyword recall. Children below this length are
+# coalesced into an adjacent sibling on the same page so a multi-bullet slide
+# becomes one coherent chunk rather than a dozen microchunks.
+CHILD_MIN_CHARS: int = 30
+
+# Recoverable boundary inserted between coalesced child fragments so the
+# original per-bullet structure can still be reconstructed downstream.
+_CHILD_JOIN: str = "\n"
+
 # Sentence-boundary regex: split after ., !, ? followed by whitespace + capital,
 # or after a newline sequence. Avoids splitting on common abbreviations by
 # requiring the next character to be uppercase or end-of-string.
@@ -358,11 +370,7 @@ def chunk_document(
             else ""
         )
 
-        # ----------------------------------------------------------------
-        # Build parent candidates: if the combined group text fits in one
-        # parent, emit it as-is.  If it would exceed PARENT_MAX_TOKENS,
-        # split the group into sub-groups at block boundaries.
-        # ----------------------------------------------------------------
+        # Split oversized groups at block boundaries.
         parent_groups = _split_group_into_parents(group_blocks)
 
         for parent_blocks in parent_groups:
@@ -382,11 +390,6 @@ def chunk_document(
             )
             result.append(parent_chunk)
 
-            # ----------------------------------------------------------------
-            # Split each block in the parent into child chunks.  Tables and
-            # chart_captions become exactly one child.  Text blocks are split
-            # at sentence boundaries.
-            # ----------------------------------------------------------------
             children = _make_children(
                 parent_blocks=parent_blocks,
                 parent_id=parent_chunk.id,
@@ -457,23 +460,97 @@ def _make_children(
     Returns:
         Ordered list of child ``Chunk`` objects.
     """
-    children: list[Chunk] = []
-
+    # Collect candidate child fragments before coalescing so that adjacent
+    # microchunks (one-bullet ListItem blocks) can be merged into a sibling.
+    candidates: list[tuple[str, ContentType, int]] = []
     for block in parent_blocks:
         fragments = _split_into_children(block.text, block.content_type)
-
         for fragment in fragments:
             if not fragment.strip():
                 continue
-            child = _make_chunk(
-                text=fragment,
-                content_type=block.content_type,
-                section_title=section_title,
-                page_number=block.page_number,
-                doc_meta=doc_meta,
-                is_parent=False,
-                parent_chunk_id=parent_id,
-            )
-            children.append(child)
+            candidates.append((fragment, block.content_type, block.page_number))
+
+    candidates = _coalesce_small_children(candidates)
+
+    children: list[Chunk] = []
+    for text, content_type, page_number in candidates:
+        child = _make_chunk(
+            text=text,
+            content_type=content_type,
+            section_title=section_title,
+            page_number=page_number,
+            doc_meta=doc_meta,
+            is_parent=False,
+            parent_chunk_id=parent_id,
+        )
+        children.append(child)
 
     return children
+
+
+def _coalesce_small_children(
+    candidates: list[tuple[str, ContentType, int]],
+) -> list[tuple[str, ContentType, int]]:
+    """Merge sub-threshold child fragments into an adjacent sibling.
+
+    A child shorter than ``CHILD_MIN_CHARS`` is folded into a neighbour that
+    shares its page and content type, joined with ``_CHILD_JOIN`` so the
+    original per-bullet boundaries stay recoverable. Tables and chart captions
+    are atomic and never merged across content types. When a run of short
+    fragments cannot find a same-type sibling on the page, it is emitted as-is
+    so no text is dropped.
+
+    Args:
+        candidates: Ordered ``(text, content_type, page_number)`` triples.
+
+    Returns:
+        A new list with short same-type/same-page fragments coalesced.
+    """
+    def _atomic(ct: ContentType) -> bool:
+        return ct in ("table", "chart_caption")
+
+    merged: list[tuple[str, ContentType, int]] = []
+
+    for text, content_type, page_number in candidates:
+        short = len(text.strip()) < CHILD_MIN_CHARS
+
+        # Prefer merging a short fragment backward into the preceding sibling
+        # when they share page and (non-atomic) content type.
+        if merged and short and not _atomic(content_type):
+            prev_text, prev_ct, prev_page = merged[-1]
+            if (
+                not _atomic(prev_ct)
+                and prev_ct == content_type
+                and prev_page == page_number
+            ):
+                merged[-1] = (
+                    f"{prev_text}{_CHILD_JOIN}{text}",
+                    prev_ct,
+                    prev_page,
+                )
+                continue
+
+        merged.append((text, content_type, page_number))
+
+    # A leading microchunk has no prior sibling to absorb it, so fold it forward
+    # into the next same-page/same-type fragment instead.
+    if (
+        len(merged) >= 2
+        and len(merged[0][0].strip()) < CHILD_MIN_CHARS
+        and not _atomic(merged[0][1])
+    ):
+        head_text, head_ct, head_page = merged[0]
+        nxt_text, nxt_ct, nxt_page = merged[1]
+        if (
+            not _atomic(nxt_ct)
+            and nxt_ct == head_ct
+            and nxt_page == head_page
+        ):
+            merged[1] = (
+                f"{head_text}{_CHILD_JOIN}{nxt_text}",
+                nxt_ct,
+                nxt_page,
+            )
+            merged.pop(0)
+
+    return merged

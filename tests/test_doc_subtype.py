@@ -205,7 +205,8 @@ def test_classify_doc_subtype_exactly_at_threshold_returns_value() -> None:
 def test_classify_doc_subtype_exception_returns_unknown() -> None:
     from src.ingestion.metadata import classify_doc_subtype
 
-    with patch("src.ingestion.metadata._get_subtype_client") as mock_get_client:
+    with patch("src.ingestion.metadata._get_subtype_client") as mock_get_client, \
+            patch("src.ingestion.metadata.time.sleep"):
         mock_client = MagicMock()
         mock_client.messages.create.side_effect = RuntimeError("API unavailable")
         mock_get_client.return_value = mock_client
@@ -216,13 +217,16 @@ def test_classify_doc_subtype_exception_returns_unknown() -> None:
             doc_type="investor_presentation",
         )
 
+    # Transient errors are retried before giving up.
+    assert mock_client.messages.create.call_count == 3
     assert result == "unknown"
 
 
 def test_classify_doc_subtype_connection_error_returns_unknown() -> None:
     from src.ingestion.metadata import classify_doc_subtype
 
-    with patch("src.ingestion.metadata._get_subtype_client") as mock_get_client:
+    with patch("src.ingestion.metadata._get_subtype_client") as mock_get_client, \
+            patch("src.ingestion.metadata.time.sleep"):
         mock_get_client.side_effect = RuntimeError("ANTHROPIC_API_KEY is not set")
 
         result = classify_doc_subtype(
@@ -232,6 +236,35 @@ def test_classify_doc_subtype_connection_error_returns_unknown() -> None:
         )
 
     assert result == "unknown"
+
+
+def test_classify_doc_subtype_empty_body_retried_then_succeeds() -> None:
+    """A blank first response is retried; the second valid response is used."""
+    from src.ingestion.metadata import classify_doc_subtype
+
+    empty_block = MagicMock()
+    empty_block.type = "text"
+    empty_block.text = ""
+    empty_response = MagicMock()
+    empty_response.content = [empty_block]
+
+    with patch("src.ingestion.metadata._get_subtype_client") as mock_get_client, \
+            patch("src.ingestion.metadata.time.sleep"):
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [
+            empty_response,
+            _build_mock_response("investor_day_session", 0.95),
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = classify_doc_subtype(
+            first_page_text="2025 Investor Day Morning Session — Welcome and Agenda",
+            filename="bxp_morning_session.pdf",
+            doc_type="investor_presentation",
+        )
+
+    assert mock_client.messages.create.call_count == 2
+    assert result == "investor_day_session"
 
 
 # ---------------------------------------------------------------------------

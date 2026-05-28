@@ -119,18 +119,23 @@ MIN_REQUEST_INTERVAL_SECONDS = _parse_float_env(
 
 VISION_PROMPT = """Examine this image from a REIT investor presentation.
 
-If this is NOT a chart (it's a logo, headshot, decorative graphic, photograph, map without data values, or other non-data visual): respond with exactly the single word: NOT_CHART
+First decide whether the image carries extractable data.
 
-If this IS a chart, table-as-image, or data visualization, extract its content in this format:
+Respond with exactly the single word NOT_CHART when it is decorative or has no readable data: a logo, headshot, photograph, icon, background texture, or a map/illustration with no legible labels and no legend.
 
-Chart type: <bar / line / pie / scatter / waterfall / table / other>
+Otherwise — a chart, table-as-image, data visualization, OR a map/diagram that carries legible text labels or a legend — extract its content in this format:
+
+Chart type: <bar / line / pie / scatter / waterfall / table / map / diagram / other>
 Title: <if visible, else "(none)">
-Axes / categories: <X-axis label and units; Y-axis label and units; or category names>
-Data series: <each series name and what it represents>
-Key values: <list the readable data points with their associated label; mark approximations explicitly with "approximately">
-Insight: <one sentence on what the chart is communicating; trend direction, comparison, anomaly>
+Axes / categories: <X-axis and Y-axis labels with units; or, for a map/diagram, the legend categories and what each color or symbol denotes>
+Data series: <each series name and what it represents; for a map, what the plotted locations or regions represent>
+Key values: <list the readable data points, or the labeled locations/entities each with its label and — where a legend assigns one — its category (e.g. "Caesars Palace - VICI/Caesars"); transcribe every label exactly as printed>
+Insight: <one sentence on what the visual communicates: trend, comparison, count, or geographic concentration>
 
-Be precise. Where you cannot read a value confidently, say so ("approximately 5.2x", "between 30% and 40%"). Never invent numbers."""
+Be precise:
+- Transcribe labels, names, and numbers EXACTLY as printed. Never invent, infer, translate, or complete a label, location, category, or value.
+- If a label, its color/category, or a value is not legible, omit it rather than guessing — never approximate text. You may mark a partially-readable number "approximately" ("approximately 5.2x", "between 30% and 40%").
+- Report only what is visibly present in this image."""
 
 
 _client: Anthropic | None = None

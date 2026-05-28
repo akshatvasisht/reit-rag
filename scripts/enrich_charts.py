@@ -162,8 +162,11 @@ def _is_likely_chart(picture_item) -> bool:
     bbox = getattr(provs[0], "bbox", None)
     if bbox is None:
         return True
-    width = bbox.r - bbox.l
-    height = bbox.b - bbox.t
+    # Docling emits PDF bboxes in a BOTTOMLEFT coordinate origin, so b - t is
+    # negative; take each side's magnitude so the area is origin-agnostic and a
+    # genuine chart isn't discarded as "too small".
+    width = abs(bbox.r - bbox.l)
+    height = abs(bbox.b - bbox.t)
     area = width * height
     return area >= MIN_CHART_AREA_PX
 
@@ -197,6 +200,27 @@ def _page_of(item: PictureItem) -> Optional[int]:
     except (AttributeError, IndexError, TypeError, ValueError):
         pass
     return None
+
+
+def _page_image(docling_doc, page: Optional[int]) -> Optional["Image.Image"]:
+    """Return the full-page render for *page* (1-based), or None if unavailable.
+
+    Requires the document to have been parsed with page-image generation
+    (the image pipeline used by ``parse_pdf(with_images=True)``). Used by the
+    fallback path when a full-bleed map/diagram is fragmented across PictureItems
+    so no single picture crop yields a confident extraction.
+    """
+    if page is None:
+        return None
+    try:
+        page_item = docling_doc.pages.get(page)
+    except (AttributeError, TypeError):
+        return None
+    if page_item is None:
+        return None
+    img_ref = getattr(page_item, "image", None)
+    pil = getattr(img_ref, "pil_image", None) if img_ref is not None else None
+    return pil if isinstance(pil, Image.Image) else None
 
 
 def _flush_chunks(conn, pending_chunks: list[Chunk], company: str) -> int:
@@ -295,6 +319,12 @@ def enrich_document(doc_row: dict, force: bool) -> int:
     skipped_small = 0
     fallback_created = 0
     extraction_errors = 0
+    page_recovered_count = 0
+    # Pages already attempted / recovered via the full-page fallback, so a page
+    # is rendered and scored at most once even when several of its pictures are
+    # low-confidence.
+    page_fallback_attempted: set[int] = set()
+    page_recovered: set[int] = set()
 
     for i, (item, page) in enumerate(pictures, start=1):
         # Pre-filter: skip images whose bbox is too small to be a data chart.
@@ -325,37 +355,88 @@ def enrich_document(doc_row: dict, force: bool) -> int:
             continue
 
         if needs_fallback:
-            # Extraction produced output but it did not meet the confidence gate.
-            # Build an additive chart_context chunk so the page stays findable.
-            sibling_texts = _collect_page_text(docling_doc, page)
-            fallback_text = build_chart_context_text(
-                section_title=None,
-                sibling_texts=sibling_texts,
-            )
-            pending_chunks.append(
-                Chunk(
-                    document_id=doc_meta.id,
-                    company=doc_meta.company,
-                    ticker=doc_meta.ticker,
-                    doc_type=doc_meta.doc_type,
-                    report_date=doc_meta.report_date,
-                    doc_version=doc_meta.doc_version,
-                    period_covered=doc_meta.period_covered,
-                    source_authority="company_authored",
-                    chunk_text=fallback_text,
-                    content_type="chart_context",
-                    section_title=None,
-                    page_number=page,
-                    is_parent=False,
-                    parent_chunk_id=None,
-                    token_count=None,
+            # Per-picture extraction was low-confidence. Docling sometimes
+            # fragments a full-bleed map/diagram into pieces no single crop
+            # captures, so try the whole page once before giving up.
+            if page is not None and page in page_recovered:
+                # Page already captured by a full-page extraction; the per-piece
+                # crop would only duplicate it.
+                continue
+
+            page_desc: Optional[str] = None
+            if page is not None and page not in page_fallback_attempted:
+                page_fallback_attempted.add(page)
+                page_img = _page_image(docling_doc, page)
+                if page_img is not None:
+                    try:
+                        page_desc, _ = extract_chart(page_img)
+                    except Exception as e:  # noqa: BLE001 — log and fall through to chart_context
+                        logger.warning(
+                            "  Page %s full-page fallback call failed (%s)",
+                            page, type(e).__name__,
+                        )
+                        page_desc = None
+
+            if page_desc is not None:
+                # Recovered the fragmented visual from the full-page render.
+                if page is not None:
+                    page_recovered.add(page)
+                page_recovered_count += 1
+                pending_chunks.append(
+                    Chunk(
+                        document_id=doc_meta.id,
+                        company=doc_meta.company,
+                        ticker=doc_meta.ticker,
+                        doc_type=doc_meta.doc_type,
+                        report_date=doc_meta.report_date,
+                        doc_version=doc_meta.doc_version,
+                        period_covered=doc_meta.period_covered,
+                        source_authority="company_authored",
+                        chunk_text=page_desc,
+                        content_type="chart_description",
+                        section_title=None,
+                        page_number=page,
+                        is_parent=False,
+                        parent_chunk_id=None,
+                        token_count=None,
+                    )
                 )
-            )
-            fallback_created += 1
-            logger.info(
-                "  Picture %d/%d on page %s: low-confidence — chart_context fallback created",
-                i, len(pictures), page,
-            )
+                logger.info(
+                    "  Picture %d/%d on page %s: low-confidence crop — recovered via full-page extraction (%d chars)",
+                    i, len(pictures), page, len(page_desc),
+                )
+            else:
+                # Full-page fallback unavailable or also low-confidence: build an
+                # additive chart_context chunk so the page stays findable.
+                sibling_texts = _collect_page_text(docling_doc, page)
+                fallback_text = build_chart_context_text(
+                    section_title=None,
+                    sibling_texts=sibling_texts,
+                )
+                pending_chunks.append(
+                    Chunk(
+                        document_id=doc_meta.id,
+                        company=doc_meta.company,
+                        ticker=doc_meta.ticker,
+                        doc_type=doc_meta.doc_type,
+                        report_date=doc_meta.report_date,
+                        doc_version=doc_meta.doc_version,
+                        period_covered=doc_meta.period_covered,
+                        source_authority="company_authored",
+                        chunk_text=fallback_text,
+                        content_type="chart_context",
+                        section_title=None,
+                        page_number=page,
+                        is_parent=False,
+                        parent_chunk_id=None,
+                        token_count=None,
+                    )
+                )
+                fallback_created += 1
+                logger.info(
+                    "  Picture %d/%d on page %s: low-confidence — chart_context fallback created",
+                    i, len(pictures), page,
+                )
         else:
             # Confident extraction: store as chart_description.
             # is_parent=False so the retrieval layer (which only queries children)
@@ -389,9 +470,10 @@ def enrich_document(doc_row: dict, force: bool) -> int:
                 written_total += _flush_chunks(conn, pending_chunks, company)
 
     logger.info(
-        "  Vision pass complete: %d charts extracted, %d fallbacks, "
-        "%d skipped as NOT_CHART, %d too small, %d no image",
+        "  Vision pass complete: %d charts extracted (%d via full-page fallback), "
+        "%d chart_context fallbacks, %d skipped as NOT_CHART, %d too small, %d no image",
         written_total + len(pending_chunks) - fallback_created,
+        page_recovered_count,
         fallback_created,
         skipped_not_chart,
         skipped_small,

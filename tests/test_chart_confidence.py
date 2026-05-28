@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from src.ingestion.chart_extractor import (
     MIN_DESCRIPTION_LENGTH,
+    VISION_PROMPT,
     _is_confident_extraction,
     build_chart_context_text,
     extract_chart,
@@ -144,6 +145,22 @@ def test_likely_chart_exactly_at_threshold() -> None:
     item = _make_picture_item(_make_bbox(0, 0, 100, 100))
     from scripts.enrich_charts import _is_likely_chart
     assert _is_likely_chart(item) is True
+
+
+def test_likely_chart_bottomleft_origin_large() -> None:
+    """BOTTOMLEFT-origin bboxes (top > bottom) yield negative b-t; a large chart must still register as likely, so unsigned area is used."""
+    # width 343, |height| 340 -> 116_620 >= 10_000
+    item = _make_picture_item(_make_bbox(0, 400, 343, 60))
+    from scripts.enrich_charts import _is_likely_chart
+    assert _is_likely_chart(item) is True
+
+
+def test_likely_chart_bottomleft_origin_small() -> None:
+    """BOTTOMLEFT origin small icon (|area| < threshold) → False."""
+    # width 50, |height| 80 -> 4_000 < 10_000
+    item = _make_picture_item(_make_bbox(0, 100, 50, 20))
+    from scripts.enrich_charts import _is_likely_chart
+    assert _is_likely_chart(item) is False
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +297,31 @@ def test_extract_chart_small_image_returns_none_no_fallback() -> None:
     mock_get_client.assert_not_called()
     assert description is None
     assert needs_fallback is False
+
+
+# ---------------------------------------------------------------------------
+# VISION_PROMPT content — map/diagram extraction + anti-hallucination
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_extracts_labeled_maps_and_diagrams() -> None:
+    """The prompt must treat label/legend-bearing maps and diagrams as extractable."""
+    p = VISION_PROMPT.lower()
+    assert "map" in p and "diagram" in p
+    assert "legend" in p
+
+
+def test_prompt_still_skips_decorative_or_labelless_maps() -> None:
+    """Decorative / label-less maps must still route to the NOT_CHART sentinel."""
+    p = VISION_PROMPT
+    assert "NOT_CHART" in p
+    assert "no legible labels and no legend" in p.lower()
+
+
+def test_prompt_forbids_inventing_labels_not_just_numbers() -> None:
+    """Anti-hallucination must cover labels/locations, not only numeric values."""
+    p = VISION_PROMPT.lower()
+    assert "exactly as printed" in p
+    assert "never invent" in p
+    # the rule must name non-numeric targets (label/location/category), not just numbers
+    assert any(tok in p for tok in ("label", "location", "category"))

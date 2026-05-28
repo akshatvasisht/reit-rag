@@ -48,6 +48,7 @@ _IMAGE_PIPELINE_OPTIONS = PdfPipelineOptions(
     do_ocr=False,
     do_table_structure=True,
     generate_picture_images=True,
+    generate_page_images=True,  # full-page render for the map/diagram fallback path
     images_scale=2.0,  # bump resolution; cheap, helps the vision model.
 )
 _CONVERTER_WITH_IMAGES: Optional[DocumentConverter] = None
