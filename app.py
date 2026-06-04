@@ -222,10 +222,10 @@ st.set_page_config(
 )
 
 
-@st.cache_resource(show_spinner="Loading retrieval models (~30s on first run)…")
+@st.cache_resource(show_spinner="Loading retrieval models (first run pulls ~1.5 GB from HuggingFace — several minutes; subsequent runs ~30 s)…")
 def _warm_models() -> None:
     """Pre-load the embedder and cross-encoder once per process so the first
-    user query does not pay the ~30s cold-load latency mid-stream."""
+    user query does not pay the cold-load latency mid-stream."""
     from src.ingestion.embedder import _get_model
     from src.retrieval.reranker import _get_cross_encoder
     _get_model()
@@ -233,25 +233,55 @@ def _warm_models() -> None:
 
 
 @st.cache_resource(show_spinner=False)
-def _startup_checks() -> str | None:
+def _startup_checks() -> tuple[str, bool] | None:
     """Run app-entrypoint checks that require the DB; invoked once per process.
 
-    Returns None on success or a short user-facing error message on failure.
-    Wrapped in a try/except so an unexpected import or DB error does not
-    abort the Streamlit page render — the UI surfaces the message instead.
+    Returns ``None`` when the corpus is fully populated. Otherwise returns
+    ``(message, halt)`` where *message* is a user-facing banner and *halt* is
+    True when the UI should stop before rendering the query box (DB is empty
+    or unreachable — no useful query is possible) and False when render
+    should continue (e.g. contextualization not yet run — retrieval still
+    works via COALESCE fallback). Wrapped in a try/except so an unexpected
+    import or DB error does not abort the Streamlit page render.
     """
     try:
         from src.retrieval.pipeline import check_contextual_activation
-        check_contextual_activation()
+        status = check_contextual_activation()
+        if status.state == "empty_db":
+            return (
+                "The chunks table is empty. Run the ingestion sequence from the README "
+                "before launching the UI:  `python scripts/migrate.py` → "
+                "`python scripts/ingest.py` → `python scripts/enrich_charts.py` → "
+                "the back-fill scripts → `streamlit run app.py`.",
+                True,
+            )
+        if status.state == "check_failed":
+            return (
+                "The activation check could not reach the database. Confirm "
+                "`docker compose up -d --wait` succeeded and `DATABASE_URL` matches "
+                "`.env.example`.",
+                True,
+            )
+        if status.state == "low_activation":
+            return (
+                f"Contextual retrieval is only {status.pct:.1f}% populated "
+                f"({status.populated}/{status.total} text chunks). Run "
+                "`python scripts/contextualize.py` to activate it; retrieval falls "
+                "back to base embeddings until then.",
+                False,
+            )
         return None
     except Exception as exc:  # noqa: BLE001
-        return f"{type(exc).__name__}: {exc}"
+        return (f"{type(exc).__name__}: {exc}", True)
 
 
 _warm_models()
-_startup_error = _startup_checks()
-if _startup_error:
-    st.warning(f"Startup check reported a non-fatal issue: {_startup_error}")
+_startup_state = _startup_checks()
+if _startup_state is not None:
+    _msg, _halt = _startup_state
+    st.warning(_msg)
+    if _halt:
+        st.stop()
 
 
 st.title("Corporate RAG for REIT Investor Presentations")

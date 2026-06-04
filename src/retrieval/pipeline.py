@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import NamedTuple
 from uuid import UUID
 
 from src.db import connect
@@ -51,15 +52,31 @@ _ACTIVATION_CHECK_SQL = """
 _CONTEXTUAL_RETRIEVAL_MIN_PCT = 95.0
 
 
-def check_contextual_activation() -> None:
-    """Warn when contextual retrieval columns are not sufficiently populated.
+class ActivationStatus(NamedTuple):
+    """Result of the contextual-retrieval activation check.
+
+    ``state`` is one of:
+    - ``"ok"``: at least MIN_PCT of text chunks have a contextualized embedding.
+    - ``"empty_db"``: zero text chunks present — ingestion has not run.
+    - ``"low_activation"``: chunks exist but contextualize.py has not populated them.
+    - ``"check_failed"``: an exception was caught (missing DB, missing table, etc.).
+    """
+
+    state: str
+    populated: int = 0
+    total: int = 0
+    pct: float = 0.0
+
+
+def check_contextual_activation() -> ActivationStatus:
+    """Report whether contextual retrieval is activated; warn when it isn't.
 
     Called explicitly by application entrypoints (Streamlit app, ingestion
     scripts) rather than at module import time so importing this module
     does not require DB availability. Resilient by design: any failure
-    (missing DB, missing table, missing env var) is caught so application
-    startup never raises from this check — but the exception is now
-    logged at WARNING so operators can see when the check is failing.
+    (missing DB, missing table, missing env var) is caught and reported as
+    ``state="check_failed"`` so application startup never raises from this
+    check, but the caller can surface a user-facing banner.
     """
     try:
         from src.db import connect as _connect  # noqa: PLC0415
@@ -69,26 +86,36 @@ def check_contextual_activation() -> None:
             row = cur.fetchone()
 
         if row is None:
-            return
+            return ActivationStatus(state="check_failed")
 
-        total = row[1]
+        populated = int(row[0] or 0)
+        total = int(row[1] or 0)
         if total == 0:
-            return
+            logger.warning(
+                "Activation check: zero text chunks in DB — run scripts/ingest.py "
+                "(and the back-fill scripts in the README) before launching the app."
+            )
+            return ActivationStatus(state="empty_db", populated=0, total=0, pct=0.0)
 
         pct = float(row[2])
         if pct < _CONTEXTUAL_RETRIEVAL_MIN_PCT:
             logger.warning(
                 "Contextual retrieval is only %.1f%% populated; retrieval will fall "
                 "back to base embedding columns via COALESCE. "
-                "Run scripts/contextualize.py --embed to activate.",
+                "Run scripts/contextualize.py to activate.",
                 pct,
             )
+            return ActivationStatus(
+                state="low_activation", populated=populated, total=total, pct=pct
+            )
+        return ActivationStatus(state="ok", populated=populated, total=total, pct=pct)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Contextual-activation startup check failed (%s: %s); "
             "proceeding without the activation signal.",
             type(exc).__name__, exc,
         )
+        return ActivationStatus(state="check_failed")
 
 
 # ---------------------------------------------------------------------------

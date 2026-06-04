@@ -128,22 +128,30 @@ Confidence is computed on the post-rerank chunk list, before conflict injection 
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-docker compose up -d
-python scripts/migrate.py
 mkdir -p data/pdfs && cp /path/to/provided/*.pdf data/pdfs/   # 10 corpus PDFs
-python scripts/ingest.py
-python scripts/enrich_charts.py
 
-# One-time back-fills (needed for full feature set; idempotent on re-run):
-python scripts/reclassify_subtypes.py        # populate doc_subtype
-python scripts/reclassify_page_content.py    # populate page_content_class
-python scripts/contextualize.py              # Batches API: contextualize + Qwen3 re-embed; activation gate
-python scripts/extract_claims.py             # populate chunk_claims (M4 verification pass)
-
-streamlit run app.py
+# One-command setup — chains docker compose (with healthcheck wait), DB
+# migration, ingestion, vision chart enrichment, and the Batch-API back-fills:
+make all
+make app                                     # or: streamlit run app.py
 ```
 
-`scripts/enrich_charts.py` runs Claude vision over every detected chart picture; expect roughly $2–5 in API cost for the full corpus on first run, idempotent on re-runs.
+Or run each step on its own for fine control or cost gating:
+
+```bash
+make up                  # docker compose up -d --wait
+make migrate             # DB schema
+make ingest              # parse PDFs in data/pdfs/ -> chunks  (no API cost)
+make setup-free          # alias for: up + migrate + ingest
+
+make enrich              # Anthropic vision over chart pictures (~$2-5)
+make back-fill           # reclassify subtypes + page content +
+                         # contextualize (Batch API) + extract_claims (Batch API)
+
+make help                # list every target
+```
+
+`scripts/enrich_charts.py` runs Claude vision over every detected chart picture; expect roughly $2–5 in API cost for the full corpus on first run, idempotent on re-runs. The Batch-API back-fills (`contextualize` and `extract_claims`) can take from minutes to several hours depending on Anthropic's queue depth; `contextualize.py` persists its in-flight batch handle in `data/.contextualize_state.json`, so a Ctrl-C between submit and write is safe to resume on the next run without re-billing.
 
 Required environment variables:
 
@@ -153,7 +161,8 @@ Required environment variables:
 ## Validate
 
 ```bash
-python -m pytest tests/ -v
-python -m mypy src/ --ignore-missing-imports
+make test                                       # or: python -m pytest tests/ -v
+make typecheck                                  # or: python -m mypy src/ --ignore-missing-imports
+make lint                                       # or: ruff check src/ tests/ scripts/ app.py
 python scripts/evaluate.py --out evaluation_report.md
 ```

@@ -82,12 +82,30 @@ def _configure_raw_logits(encoder: CrossEncoder) -> CrossEncoder:
     return encoder
 
 
+def _select_device() -> str:
+    """Pick the device for the cross-encoder and warn loudly when on CPU.
+
+    BGE-reranker-v2-m3 is ~568M params; CPU inference is multi-second per
+    pair on this corpus. We pass the device explicitly so a user without a
+    GPU sees a clear warning rather than silent multi-minute query latency.
+    """
+    if torch.cuda.is_available():
+        return "cuda"
+    logger.warning(
+        "No CUDA device detected — BGE reranker will run on CPU and will be "
+        "impractically slow (multi-second per pair). README recommends a GPU."
+    )
+    return "cpu"
+
+
 def _get_cross_encoder() -> CrossEncoder:
     """Return the reranker singleton, loading it on first use."""
     global _cross_encoder
     if _cross_encoder is None:
+        device = _select_device()
+        logger.info("Loading reranker %s on device=%s", _MODEL_NAME, device)
         _cross_encoder = _configure_raw_logits(
-            CrossEncoder(_MODEL_NAME, revision=_MODEL_REVISION)
+            CrossEncoder(_MODEL_NAME, revision=_MODEL_REVISION, device=device)
         )
     return _cross_encoder
 
@@ -101,7 +119,7 @@ def _get_registry_encoder(model_name: str, revision: str | None) -> CrossEncoder
     key = (model_name, revision)
     if key not in _registry:
         try:
-            kwargs: dict[str, Any] = {}
+            kwargs: dict[str, Any] = {"device": _select_device()}
             if revision is not None:
                 kwargs["revision"] = revision
             _registry[key] = _configure_raw_logits(CrossEncoder(model_name, **kwargs))

@@ -22,6 +22,7 @@ per-document cost amortizes across all that document's chunks.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -97,6 +98,9 @@ logger = logging.getLogger("contextualize")
 # Seconds to wait between batch-status polls.  The Batch API typically finishes
 # within a few minutes for small batches; 30 s is a reasonable poll interval.
 POLL_INTERVAL_SECONDS = 30
+# 6 h ceiling; Batch API SLA tops out at 24 h, but stalls beyond 6 h indicate
+# a real failure rather than slow processing.
+MAX_POLL_SECONDS = 60 * 60 * 6
 
 # Minimum percentage of text chunks that must have a contextualized embedding
 # before the script considers contextual retrieval fully activated.
@@ -231,14 +235,82 @@ def _submit_batch(
     return batch.id
 
 
+# Without persistence, a Ctrl-C between submit and result-write loses the
+# batch handle: the next run re-submits (and re-bills) the same chunks while
+# the original batch keeps processing.
+_STATE_FILE = Path("data/.contextualize_state.json")
+
+
+def _load_state() -> dict | None:
+    """Return the persisted in-flight batch state, or None when none exists."""
+    if not _STATE_FILE.exists():
+        return None
+    try:
+        return json.loads(_STATE_FILE.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read %s (%s); ignoring", _STATE_FILE, exc)
+        return None
+
+
+def _save_state(doc_id, batch_id: str) -> None:
+    """Persist the in-flight batch handle before polling so an interrupt can resume."""
+    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _STATE_FILE.write_text(
+        json.dumps({"doc_id": str(doc_id), "batch_id": batch_id}, indent=2)
+    )
+
+
+def _clear_state() -> None:
+    """Remove the state file once results have been written."""
+    _STATE_FILE.unlink(missing_ok=True)
+
+
+def _resume_in_flight_batch(client) -> None:
+    """If a previous run was interrupted between submit and write, finish that
+    batch first so the user is not re-billed by re-submitting the same chunks.
+    Safe to call even when no state file exists — returns immediately.
+    """
+    state = _load_state()
+    if state is None:
+        return
+    batch_id = state["batch_id"]
+    logger.info(
+        "Resuming in-flight batch %s from previous run (doc %s)",
+        batch_id, state.get("doc_id", "?"),
+    )
+    embedder = _get_embedder()
+    _poll_until_done(client, batch_id)
+    with connect() as conn:
+        register_vector(conn)
+        n = _write_results(conn, client, batch_id, embedder)
+    _clear_state()
+    logger.info("  Resumed batch wrote %d chunks; state file cleared", n)
+
+
 def _poll_until_done(client, batch_id: str) -> None:
-    """Block until the batch processing_status is 'ended'."""
+    """Block until the batch reaches processing_status == 'ended'.
+
+    Raises RuntimeError on a terminal failure status (canceling/canceled/errored)
+    so the script does not loop indefinitely on a failed batch. Raises TimeoutError
+    when total polling exceeds MAX_POLL_SECONDS so a permanently-stuck batch cannot
+    deadlock the contextualization run.
+    """
+    deadline = time.monotonic() + MAX_POLL_SECONDS
+    last_status: str | None = None
     while True:
         batch = client.messages.batches.retrieve(batch_id)
         status = batch.processing_status
+        last_status = status
         logger.info("  Batch %s — status: %s", batch_id, status)
         if status == "ended":
             return
+        if status in ("canceling", "canceled", "errored"):
+            raise RuntimeError(f"Batch {batch_id} ended in status: {status}")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Batch {batch_id} did not complete within {MAX_POLL_SECONDS}s "
+                f"(last status: {last_status})"
+            )
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -376,13 +448,15 @@ def contextualize_document(
         )
 
         batch_id = _submit_batch(client, batch, document_text)
-        logger.info("  Batch submitted: %s", batch_id)
+        _save_state(doc_id, batch_id)
+        logger.info("  Batch submitted: %s (state persisted to %s)", batch_id, _STATE_FILE)
 
         _poll_until_done(client, batch_id)
 
         with connect() as conn:
             register_vector(conn)
             n = _write_results(conn, client, batch_id, embedder)
+        _clear_state()
 
         written += n
         logger.info("  Batch complete — wrote %d chunks (total so far: %d)", n, written)
@@ -433,7 +507,7 @@ def verify_contextual_retrieval_activated() -> None:
         sys.exit(
             f"CONTEXTUAL RETRIEVAL NOT FULLY ACTIVATED: only {pct}% of text chunks "
             f"have contextualized embeddings. Do not proceed to evaluation until this "
-            f"reaches >= 95%. Re-run scripts/contextualize.py --embed or check Batch "
+            f"reaches >= 95%. Re-run scripts/contextualize.py (use --force to overwrite) or check Batch "
             f"API job status."
         )
 
@@ -472,6 +546,10 @@ def main() -> None:
     args = parser.parse_args()
 
     client = _get_client()
+
+    # Finish any batch that was submitted but not written by a prior interrupted
+    # run; otherwise we'd re-submit (and re-bill) the same chunks below.
+    _resume_in_flight_batch(client)
 
     docs = _list_documents(doc_id=args.doc)
     if not docs:

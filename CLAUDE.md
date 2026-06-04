@@ -4,8 +4,9 @@ Agent-facing rules for this repository. Keep this file short and essential.
 
 ## Read First
 
-- `README.md` for setup, run, and validation commands.
-- `.env.example` for required environment variables.
+- `README.md` — `## Run` (setup), `## Validate` (test / typecheck / lint), architecture, known limitations.
+- `.env.example` — required environment variables and optional tuning.
+- `Makefile` — one-command shortcuts (`make all`, `make app`, `make test|typecheck|lint`); run `make help` to list every target.
 
 ## Non-Negotiable Invariants
 
@@ -22,11 +23,3 @@ Agent-facing rules for this repository. Keep this file short and essential.
 - Keep `README.md` aligned with runtime behavior.
 - When adding/changing evaluation logic, ensure reported labels match actual behavior.
 - Add tests for any behavior changes in ingestion, retrieval, or evaluation paths.
-
-## Quick Commands
-
-```bash
-python -m pytest tests/ -v
-python -m mypy src/ --ignore-missing-imports
-python scripts/evaluate.py --out evaluation_report.md
-```
